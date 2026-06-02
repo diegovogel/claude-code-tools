@@ -30,6 +30,8 @@ Standing engineering rules I expect to apply on any project I work on. Stack-agn
 ## Building and committing
 
 - Build in thin vertical slices. After each slice, the project must build and existing tests must pass.
+- When you're unsure how a mechanism works (a framework feature, an API contract, a component interaction), build the smallest piece that exercises just that mechanism and prove it works before composing the next piece on top. Stacking several unproven parts at once produces a failure you can't localize; an incremental assembly isolates the broken piece for you.
+- Automate the verify-by-running loop when the work warrants it. Driving the real app end to end (a headless browser such as Playwright or Cypress for web UIs, an HTTP client for APIs, a script or REPL for libraries) turns a slow manual check into a fast, repeatable one and pairs well with binary-search debugging. If the project has no such harness, do not install one automatically; suggest it and explain the benefit, then proceed with whatever verification is available.
 - Touch only what the task requires.
 - If you've written ~100 lines without running tests, stop and run them.
 - Each commit does one logical thing. Don't combine refactor with feature, or formatting with behavior. A PR can group multiple related commits (e.g., a feature plus a small related bug fix or tooling tweak found along the way), as long as each commit individually makes sense.
@@ -59,6 +61,7 @@ Standing engineering rules I expect to apply on any project I work on. Stack-agn
 - Use structured file logging. If the project has a logger module, use it. Don't introduce bare `console.log` / `print` for diagnostics in backend code.
 - If the logs don't have the detail to localize the bug, add more logging, reproduce, then read. Self-serve the information you need.
 - Methodology: stop making changes; preserve evidence (logs, error messages, stack traces, repro steps); reproduce; isolate to the minimal failing case; fix the root cause; add a regression test that fails without the fix; resume.
+- Isolate by binary search, don't rewrite-and-guess. When a flow breaks, pick the midpoint of the failing path and check the actual value or output there (a log line, a DB row, an intermediate variable, a network response). If the problem already shows at the midpoint, the fault is upstream; if the midpoint is healthy, it's downstream. Halve the suspect half and repeat until you're down to a single function, query, or line. That pinpoints the exact break instead of guessing and re-running.
 - When fixing a known bug, write the failing test first. The test demonstrates the bug exists; the fix makes it pass; the test guards against recurrence.
 - Errors compound. Don't continue feature work on top of a failure.
 - Find the root cause before fixing. Don't bypass safety checks, suppress warnings, or skip the failing path to make the symptom go away.

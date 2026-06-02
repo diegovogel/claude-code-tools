@@ -18,6 +18,25 @@ Every entry has a `_Discovered: YYYY-MM-DD_` line so we can groom later.
 These describe how to interact with Designer / the gateway / the user. Amend
 them when you learn a better pattern.
 
+### Debug by binary search: isolate the failing step, don't rewrite-and-guess
+When something doesn't work, STOP. Do not rewrite large chunks or stack new
+guesses on top of the broken state. Localize the failure by halving the path:
+
+1. Pick the midpoint of the failing flow (e.g. between "scan captured in the
+   browser" and "row written to the DB") and check the ACTUAL value there,
+   using whatever observes that point: headless-browser DOM, the gateway log
+   (`system_logs.idb`), and direct `psql` inspection.
+2. If the problem is already present at the midpoint, the fault is upstream, so
+   halve the upstream half and check again. If the midpoint is healthy, the
+   fault is downstream, so halve that.
+3. Recurse until you are down to a single script line, one named-query run, or
+   one prop. That pinpoints the exact break, instead of guess-and-retry.
+
+This is the debugging counterpart to rule 2b's incremental building: build one
+verified piece at a time, and when a piece breaks, bisect to find where. A
+failure with no browser console error almost always means the error is
+gateway-side, so read `system_logs.idb` before theorizing. _Discovered: 2026-06-02_
+
 ### Check the component's built-in props BEFORE building a custom version
 Ignition's stock components are richer than they look from a glance at the
 "Add Component" menu. Before wiring a custom search input, custom pager,
@@ -273,6 +292,32 @@ A view-scope custom prop like `view.custom.selectedRow` (set from `onRowClick`) 
 - For multi-field popups, look up the row in the table's CURRENT `props.data` by id. Watch out: the data may be a cell-wrapped list (`{'value': x, 'style': ...}`) if you have a styling transform — unwrap before passing.
 
 Reading `props.data` immediately after bumping `refreshNonce` races the refresh; the DB-query path avoids the timing concern entirely. _Discovered: 2026-05-28_
+
+### `ia.container.tab`: embed views via CHILDREN (by index) + `tabs[]` for labels — `viewPath` is ignored when `text` is set
+The Tab Container has two ways to fill a tab, and they fight each other. Each
+entry in `props.tabs[]` may carry `text` (header label), `viewPath`,
+`viewParams`, `runWhileHidden`, `disabled`. **But if a tab object has BOTH
+`text` and `viewPath`, the `viewPath` is silently ignored**: you get a labeled
+tab with an empty body (no error, no console warning). There is no separate
+"header label" field distinct from `text`.
+
+The working pattern for labeled tabs that embed views: put one **child**
+component per tab in the container's `children` array (mapped to tabs **by
+index**), and use `tabs[].text` only for the labels. Embed each view with an
+`ia.display.view` child (`props.path`, `props.params`):
+```json
+"root": {
+  "type": "ia.container.tab",
+  "props": { "tabs": [ {"text": "Checkout"}, {"text": "Restock"} ] },
+  "children": [
+    { "type": "ia.display.view", "props": { "path": "checkout/checkout_sm" } },
+    { "type": "ia.display.view", "props": { "path": "store/placeholder_sm", "params": {"label": "Restock"} } }
+  ]
+}
+```
+(`tabs[].viewPath` is only a label-less shortcut: a tab with `viewPath` and no
+`text` embeds the view but you lose control of the header text.) The root of a
+view can itself be the tab container. _Discovered: 2026-06-02_
 
 ### `self` in a component event handler is the COMPONENT
 Not the view. Use `self.view` to reach view-scope state (`self.view.custom.search`,
@@ -567,6 +612,24 @@ _Discovered: 2026-05-21_
 ---
 
 ## Playwright e2e testing (debug-tools)
+
+### Driving `ia.input.barcodescannerinput` headless: focus the `<ul>`, type, press Enter
+The barcode scanner input renders as `<ul class="ia_BarcodeScannerInputComponent">`
+(each scanned value is an `<li>`) with **no `<input>` element**: it captures a
+fast keystroke burst terminated by Enter, exactly like the real hardware. So
+Playwright drives it the same way the scanner does:
+```python
+ul = page.locator('ul[data-component="ia.input.barcodescannerinput"]').nth(i)
+ul.click()                       # focus it
+page.keyboard.type("18", delay=10)
+page.keyboard.press("Enter")     # the regex `(payload)Enter` needs the terminator
+```
+The component's `regex` matches `(<payload>)Enter` — the literal token `Enter`
+is appended when the Enter key is pressed; without it the scan never commits.
+Because there's no `<input>`, `driver.type()` (which targets input-like
+elements) won't work; use the focus-the-`<ul>` + `keyboard` approach. The
+numeric-entry-field DOES render a real `<input>`, reachable as
+`[data-component="ia.input.numeric-entry-field"] input`. _Discovered: 2026-06-02_
 
 ### Cell-text selectors: substring is the default — use `>> text='X'` for exact match
 `:has-text('1')` (Playwright's default) is a SUBSTRING match — selecting a row whose `part_number` cell reads exactly `1` will also match `10`, `100`, `11`, etc. Two alternatives that look like they should give exact match but DON'T work in our Playwright version:
