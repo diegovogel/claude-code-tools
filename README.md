@@ -63,15 +63,16 @@ Some tools require additional dependencies as noted in their details below.
 
 [View source](commands/security-review-plus.md)
 
-**Why it exists:** Claude Code has a built-in `/security-review` command, which is good but not exhaustive. I wanted to layer my own checklist of accumulated security tips on top, without losing whatever upstream improvements the built-in command picks up over time.
+**Why it exists:** Claude Code has a built-in `/security-review` command, which is good but not exhaustive. I wanted to layer my own checklist of accumulated security tips on top and add framework-specific tools, without losing whatever upstream improvements the built-in command picks up over time.
 
-**What it does:** runs two passes and emits one unified report. Pass A runs the built-in `/security-review` via a subagent (so we always pick up the latest version of it). Pass B walks a curated tips file entry-by-entry, applying each tip's detection heuristic to the current branch's diff.
+**What it does:** runs three passes and emits one unified report. Pass A runs the built-in `/security-review` via a subagent (so we always pick up the latest version of it). Pass B walks a curated tips file entry-by-entry, applying each tip's detection heuristic to the current branch's diff. Pass C runs Laravel Checkpoint if requirements are met (Laravel and minimum requirements).
 
 **Highlights:**
 * Pass A is delegated to a subagent so the built-in command's "end of turn" semantics don't terminate this command early.
 * Pass B includes a coverage note listing every tip entry that was checked but not flagged. That's the audit trail proving the checklist was actually walked rather than skipped.
 * Before recommending a stored fix, Claude evaluates whether it still applies. Tips can age out as frameworks change, and the stored solution may need adapting.
 * High bar for reporting (confidence >= 8, matching the built-in command) so the report stays signal-heavy.
+* In Pass C, if Checkpoint is not installed, Claude offers to install and run it.
 
 ### Command: `review-with-codex`
 
