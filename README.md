@@ -42,6 +42,7 @@ Some tools require additional dependencies as noted in their details below.
 * Uses Plan Mode rather than printing the plan to the chat, so I can easily comment on specific parts of the plan.
 * Optional `[short summary]` arg gets woven into the first sentence of Claude's reply so Claude Code's session auto-titler picks up something useful instead of a generic title.
 * Reads project `MEMORY.md` before exploring, so it doesn't ask questions the project memory already answers.
+* Detects if the project supports parallel agent environments and creates an isolated environment for implementing the plan if supported, otherwise works in the main worktree.
 
 **Dependencies:**
 * Todoist CLI.
@@ -58,6 +59,7 @@ Some tools require additional dependencies as noted in their details below.
 * Adds temporary instrumentation when needed to help with verification steps.
 * If a small problem is found, Claude fixes it and continues the QA procedure. If a big problem is found, it stops the procedure because it should be restarted from the beginning after major changes.
 * Explicitly instructs Claude to not skip any steps because sometimes Claude likes to cut corners.
+* Automatically detects if the project uses parallel agent environments and serves the one tied to the current session.
 
 ### Command: `security-review-plus`
 

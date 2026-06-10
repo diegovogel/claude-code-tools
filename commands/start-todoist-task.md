@@ -63,6 +63,13 @@ The plan should have these sections:
 
 Do NOT start implementing. Wait for the user to comment on the plan or approve it via plan mode.
 
+## Phase 5: Isolated environment (only after plan approval)
+
+When the user approves the plan and implementation begins, check whether the repo has `scripts/agent-env.sh` at its root.
+
+- **If it exists**: before touching any code, move into an isolated agent environment. Call `EnterWorktree` with a meaningful task-derived kebab-case name (per global worktree naming conventions), then run `./scripts/agent-env.sh provision`. Implement, test, and PR from inside that environment, following the repo CLAUDE.md's "Agent Environments" rules (in particular: use the script's `serve` command, never `npm run dev`, inside an env).
+- **If it doesn't exist**: implement in place as usual. This phase is a no-op in repos without the script.
+
 ## Notes
 
 - **Session title.** Claude Code auto-titles sessions from the first user prompt and there is no tool to rename a session mid-conversation. If the user passed `[short summary]`, echo it in the first sentence of your reply so the auto-title becomes useful. If they didn't, the title will be derived from your initial response — usually fine, occasionally generic.

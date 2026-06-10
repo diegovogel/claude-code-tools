@@ -1,10 +1,29 @@
-Generate a manual QA procedure from this session's changes and walk through it interactively. The user drives the UI; you verify backend signals (logs, DB, network). Three phases: build the procedure, walk it through together, then clean up.
+Generate a manual QA procedure from this session's changes and walk through it interactively. The user drives the UI; you verify backend signals (logs, DB, network). Phase 0 makes sure the app under test is actually serving the changed code (critical when the session works in an isolated agent environment), then three phases: build the procedure, walk it through together, clean up.
 
 ## When NOT to use
 
 If the change has no UI surface — CLI-only, API-only, pure backend, library code — REFUSE the request. Tell the user manual QA is meant for end-to-end UI behavior that's hard to cover with automation, and these changes are better validated by the project's automated test suite.
 
 How to detect: scan the diff for UI-touching files (templates, components, JSX/TSX/Vue/Svelte, HTML, layouts, route handlers that render, CSS that affects user-visible behavior). If none, decline.
+
+## Phase 0 — Serve the code under test (isolated environments)
+
+Before drafting the procedure, make sure what the user will click on is actually running THIS session's code. This matters most when the session works in an isolated agent environment: the user's normally-running app serves the main checkout, not your branch.
+
+**Detect an isolated environment.** You're in one if `git rev-parse --git-dir` and `git rev-parse --git-common-dir` differ (linked worktree rather than main checkout), or the cwd sits under an env directory (e.g. `.claude/worktrees/`), or an env marker file like `.agent-env.json` exists. If you're in the main checkout, just confirm the dev server is running with current code and move on to Phase 1.
+
+**Discover the serving mechanism — never guess it.** This command is used across projects with different stacks, so the mechanism is always project-specific. Check in priority order:
+
+1. **Project CLAUDE.md / project memory**: look for an agent-environments, QA, or takeover section that names the exact command for serving an env for manual testing. Follow it verbatim — those sections exist because the obvious approach has a known trap in that project.
+2. **A provisioning-script convention**: an env tool the repo ships (e.g. `scripts/agent-env.sh` with a `serve` subcommand, or npm/make wrappers around it). Use its serve command rather than composing your own.
+3. **Fallback**: run the project's normal dev command from inside the env directory, then hand the user the exact URL. If ports collide with the main checkout's servers, apply the canonical-address rule below.
+
+**Canonical-address rule.** Decide whether the user's client can reach the app at any address or only a fixed one:
+
+- **Fixed address** (Office add-in manifests, installed PWAs, OAuth redirect URIs, webhook receivers, hosts-file domains): the env must be served at that canonical address, which usually means displacing the main checkout's dev server. If you started that server yourself this session, stop it. If the user owns it (their terminal), ask them to stop it — don't kill their foreground processes unprompted. Either way, record "restore the main dev server" in the Cleanup checklist.
+- **Any address**: serve on the env's own ports and put the exact URL in the procedure's Setup section.
+
+Whatever Phase 0 starts, stops, or displaces goes into Phase 1's Setup (so the user knows the state) and the Cleanup checklist (so it gets restored).
 
 ## Phase 1 — Build the QA procedure
 
@@ -99,7 +118,8 @@ Run this at the end, even if Phase 2 had to stop early.
 2. Restart any services that picked up instrumentation (`docker restart <container>`, dev-server reload, etc.) so the running app reflects the cleaned code.
 3. Re-run the project's automated test suite (`uv run pytest`, `npm test`, project-specific). Report the result.
 4. Final `git diff` review with the user — confirm the only changes are the intended ones (no leftover instrumentation, no debug prints, no stray files added during instrumentation).
-5. List remaining work that came up during QA but didn't fit the current scope (follow-up tasks, broader bugs you noticed). Offer to spawn separate tasks for them.
+5. Undo Phase 0's environment changes: stop the env's servers if the user is done, and if the main checkout's dev server was stopped or displaced for the QA, remind the user to restart it (or restart it yourself if you started it this session).
+6. List remaining work that came up during QA but didn't fit the current scope (follow-up tasks, broader bugs you noticed). Offer to spawn separate tasks for them.
 
 ## Format reminders
 
