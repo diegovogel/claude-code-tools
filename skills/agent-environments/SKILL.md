@@ -213,10 +213,12 @@ itself is validated; this confirms your per-project functions are wired right.
   touch them because it requires no untracked files and a provisioned env always
   has some (config, deps, `.agent-env.json`). Relocating is a one-line CONFIG
   change if non-Claude agents ever need them elsewhere.
-- **Deterministic ports** come from a slot registry
-  (`<main>/.agent-env/slots/<name>`): a name keeps its slot forever, even across
-  destroy/recreate, so an env's ports never change under you. Slot N → ports
-  `PORT_BASE + STRIDE*N …`.
+- **Per-env ports** come from a slot registry
+  (`<main>/.agent-env/slots/<name>`): each env takes the lowest free slot, and
+  slot N → ports `PORT_BASE + STRIDE*N …`, a unique non-overlapping set so
+  parallel servers never collide. `destroy` frees the slot, so numbers stay low
+  and dense and get reused (recreating a name may hand it different ports, which
+  is fine, envs are disposable).
 - **CoW dependency cloning** is the speed win: an env is ready in seconds and
   costs ~zero disk until its files diverge from main.
 - **A managed block** in the config file (between markers) carries the env's

@@ -39,7 +39,7 @@ warn() { echo "agent-env-wp: WARNING: $*" >&2; }
 # the clones don't get auto-served as <name>.test; we serve them via wp server.
 ENV_PARENT="$HOME/WebDev/Sites/.wp-agent-envs"
 PORT_BASE=18300                 # slot N -> PORT_BASE + PORT_STRIDE*N
-PORT_STRIDE=10
+PORT_STRIDE=2                   # >= PORTS_PER_ENV (the floor); densest packing
 PORTS_PER_ENV=2                 # wp server + (optional) asset dev/watch server
 CANONICAL_BRANCH_PREFIX="worktree-"
 WP="wp"                         # WP-CLI binary
@@ -134,6 +134,7 @@ cmd_create() {
   fi
 
   slot=$(allocate_slot "$repo" "$name")
+  (( PORT_STRIDE >= PORTS_PER_ENV )) || die "PORT_STRIDE ($PORT_STRIDE) must be >= PORTS_PER_ENV ($PORTS_PER_ENV); adjacent slots would overlap"
   web_port=$((PORT_BASE + PORT_STRIDE * slot))
   asset_port=$((web_port + 1))
   exclude_artifacts "$repo"
@@ -317,7 +318,10 @@ cmd_destroy() {
     say "branch $AGENT_ENV_BRANCH kept ($uniq unique commit(s) recoverable)"
   fi
   rm -rf "$ed"
-  say "destroyed '$name' (slot retained for deterministic ports)"
+  # Free the slot so its ports return to the pool; the next new env reuses the
+  # lowest free number (no persistence: recreating this name may get new ports).
+  rm -f "$repo/.agent-env/wp-slots/$name"
+  say "destroyed '$name' (slot ${AGENT_ENV_SLOT:-?} freed)"
 }
 
 cmd="${1:-}"; [[ -n "$cmd" ]] && shift || { sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }

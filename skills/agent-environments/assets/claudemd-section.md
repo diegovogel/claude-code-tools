@@ -19,8 +19,8 @@ queue worker." >
   then `./scripts/agent-env.sh provision`. Or adopt a pre-built env via
   `EnterWorktree` with `path: .claude/worktrees/<name>` (built with
   `./scripts/agent-env.sh create <name>`).
-- **Ports**: slot N → `<PORT_BASE + 10N>` … (slot 1 = `<13010/13011>`). Slots
-  stick to names across recreate, so ports are deterministic.
+- **Ports**: slot N → `<PORT_BASE + STRIDE*N>` (slot 1 = `<13002/13003>`). Each
+  env takes the lowest free slot; `destroy` frees it for reuse.
 - **Inside an env, NEVER run `<MAIN_DEV_CMD, e.g. npm run dev>`**: it is pinned
   to the main checkout's ports and collides. This is enforced by
   `<scripts/guard-not-in-env.cjs>`. Use `./scripts/agent-env.sh serve <name>`

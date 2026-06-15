@@ -67,7 +67,9 @@ PORT_BASE=13000                        # env ports start here (main/takeover = P
                                        # MACHINE-GLOBAL: the slot registry dedups ports only
                                        # WITHIN this repo; two repos sharing this base collide
                                        # on localhost. Give each repo a distinct base (stacks.md).
-PORT_STRIDE=10                         # slot N's ports start at PORT_BASE + STRIDE*N
+PORT_STRIDE=2                         # spacing between a slot's ports; must be >= PORTS_PER_ENV or
+                                       # adjacent slots overlap. Defaults to exactly PORTS_PER_ENV
+                                       # (densest, no wasted ports); raise only for headroom.
 PORTS_PER_ENV=2                        # distinct localhost ports each env reserves
 MAIN_DEV_CMD="npm run dev"             # named in messages and the in-env guard
 
@@ -216,13 +218,15 @@ unique_commits() {  # repo branch
 
 # Ports for a slot: PORTS_PER_ENV consecutive ports starting at PORT_BASE+STRIDE*slot.
 ports_for_slot() {
+  (( PORT_STRIDE >= PORTS_PER_ENV )) || die "PORT_STRIDE ($PORT_STRIDE) must be >= PORTS_PER_ENV ($PORTS_PER_ENV); adjacent slots would overlap"
   local slot="$1" base=$((PORT_BASE + PORT_STRIDE * slot)) i
   for ((i = 0; i < PORTS_PER_ENV; i++)); do echo $((base + i)); done
 }
 
 # ---------------------------------------------------------------------------
 # Slot registry: <main>/.agent-env/slots/<name> holds the env's slot number.
-# Names keep their slot across destroy/recreate so ports are deterministic.
+# allocate_slot reuses a name's existing slot, else picks the lowest free one.
+# destroy frees the slot (see cmd_destroy), so numbers stay low and get reused.
 # ---------------------------------------------------------------------------
 allocate_slot() {
   local main="$1" name="$2" slots_dir="$1/.agent-env/slots" lock slot used
@@ -578,7 +582,10 @@ cmd_destroy() {
   else
     say "branch $branch kept ($uniq unique commit(s) recoverable; 'create $name --resume' picks them back up)"
   fi
-  say "destroyed '$name' (slot mapping retained for deterministic ports)"
+  # Free the slot so its ports return to the pool; the next new env reuses the
+  # lowest free number (no persistence: recreating this name may get new ports).
+  rm -f "$main/.agent-env/slots/$name"
+  say "destroyed '$name' (slot ${slot:-?} freed)"
 }
 
 usage() {

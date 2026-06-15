@@ -146,7 +146,7 @@ The skill also self-improves: when Claude hits a new gotcha that meets the inclu
 
 **Highlights:**
 * Copy-on-write cloning means an environment is ready in seconds and costs almost no disk until its files diverge from the main checkout (APFS on macOS, reflinks on Linux, with a plain-copy fallback elsewhere).
-* Deterministic per-environment ports from a slot registry: a given environment name always gets the same ports, even across destroy and recreate, so nothing shifts under me.
+* Each environment gets a unique, non-overlapping port set from a small slot registry, so parallel servers never fight over a port. Slots are freed when an environment is destroyed and reused by the next one, so the numbers stay low and tidy.
 * Guarded teardown that never silently loses work. `destroy` refuses to remove a dirty or unpushed environment and keeps unmerged branches around as a recovery net.
 * Stack-agnostic by design. Only a small per-project section (a config block plus a few hooks) changes between stacks; the engine underneath is identical, which is what lets it work in a stack it's never been tried in before.
 * Tested against 11 real codebases representing 7 tech stacks. 

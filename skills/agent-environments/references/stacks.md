@@ -65,21 +65,26 @@ reason.
 
 Each env reserves `PORTS_PER_ENV` consecutive ports starting at
 `PORT_BASE + PORT_STRIDE*slot`. `PORT_STRIDE` must be ≥ `PORTS_PER_ENV` so
-adjacent slots can't overlap.
+adjacent slots can't overlap, and defaults to exactly `PORTS_PER_ENV` (the densest
+packing, no wasted ports). Raise it only to reserve headroom for adding ports per
+env later, or for round, readable port numbers. The engine refuses to run if
+`PORT_STRIDE < PORTS_PER_ENV`.
 
 **`PORT_BASE` is machine-global; pick a distinct one per repo.** The slot registry
 keeps ports unique *within* a repo, but localhost ports are a host-wide resource:
 if two repos on the same machine both keep the shipped default (`13000`), their
-slot-1 envs land on the same port and collide the instant both serve (seen in the
-wild: one repo's env wanted `13010` while another repo's env had held it for
-hours). So the first adaptation step for a new repo is a `PORT_BASE` no other
-repo on the machine uses, give each its own band (`13000`, `13100`, `13200`, etc.;
-a 100-wide band fits ~10 slots at `STRIDE=10`). Probe for a free band:
+first envs land on the same port and collide the instant both serve (seen in the
+wild: one repo's env wanted a port another repo's env had held for hours). So the
+first adaptation step for a new repo is a `PORT_BASE` no other repo on the machine
+uses, give each its own band (`13000`, `13100`, `13200`, etc.). At the default
+`STRIDE=2` a 100-wide band holds ~50 envs, and because `destroy` frees slots (no
+lifetime accumulation) that ceiling is about *concurrent* envs, which you'll never
+approach. Probe for a free band:
 
 ```bash
 for base in 13000 13100 13200 13300 13400 13500 13600 13700 13800 13900; do
   busy=0
-  for off in 10 11 20 21; do          # sample the first couple of slots' ports
+  for off in 1 2 3 10 20; do          # sample low + round-stride offsets in the band
     lsof -nP -iTCP:$((base+off)) -sTCP:LISTEN -t >/dev/null 2>&1 && { busy=1; break; }
   done
   (( busy )) || { echo "free band: PORT_BASE=$base"; break; }
