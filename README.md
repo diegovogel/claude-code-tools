@@ -23,6 +23,7 @@ Some tools require additional dependencies as noted in their details below.
 
 ### Skills
 * [Ignition Designer](#skill-working-with-ignition-designer): a collection of tips and workflows that improve Claude's ability to build and debug [Ignition Perspective](https://inductiveautomation.com/ignition/modules/perspective) projects.
+* [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments.
 
 ### Other
 * [Diego's Engineering Guidelines](#document-diegos-engineering-guidelines): a set of engineering rules for Claude to follow, based on nine years of web dev.
@@ -134,6 +135,26 @@ The skill also self-improves: when Claude hits a new gotcha that meets the inclu
 **Dependencies:**
 * Playwright
 * Python venv
+
+### Skill: `agent-environments`
+
+[View source](skills/agent-environments)
+
+**Why it exists:** I regularly want more than one Claude session working in the same repo at once, or Claude working on one thing while I do something else in the same project. Plain git worktrees give you an isolated copy of the codebase, but to actually run it you have to deal with ports, `.env`, services like database and queue, and `node_modules`/`vendor`/etc. I built this so spinning up a fully isolated, runnable copy of a project is one command, and so Claude sets it up and operates it the same way every time instead of improvising.
+
+**What it does:** sets up a self-contained `scripts/agent-env.sh` in a project that spins up isolated environments on demand. Each one is a copy of the codebase and everything needed to run it. The skill is a stack-agnostic engine plus the guidance to fill in a small per-project section, so the same system adapts to Node, Laravel, WordPress, Python, and others. Day to day it's a handful of commands (which I integrate with other workflows): create an environment, serve it, list them, and destroy one when finished.
+
+**Highlights:**
+* Copy-on-write cloning means an environment is ready in seconds and costs almost no disk until its files diverge from the main checkout (APFS on macOS, reflinks on Linux, with a plain-copy fallback elsewhere).
+* Deterministic per-environment ports from a slot registry: a given environment name always gets the same ports, even across destroy and recreate, so nothing shifts under me.
+* Guarded teardown that never silently loses work. `destroy` refuses to remove a dirty or unpushed environment and keeps unmerged branches around as a recovery net.
+* Stack-agnostic by design. Only a small per-project section (a config block plus a few hooks) changes between stacks; the engine underneath is identical, which is what lets it work in a stack it's never been tried in before.
+* Tested against 11 real codebases representing 7 tech stacks. 
+* WordPress gets a dedicated flow, because there my repos are usually a single theme or plugin rather than the whole site. The environment clones the entire WordPress install and swaps the repo in as a worktree.
+* Wired into my other tools: `start-todoist-task` implements its plan inside a fresh environment, and `manual-qa` serves the one tied to the current session.
+
+**Dependencies:**
+* A copy-on-write-capable filesystem for the speed benefit (APFS on macOS, btrfs or xfs on Linux). It still works without one, just with a slower full copy.
 
 ### Document: Diego's Engineering Guidelines
 
