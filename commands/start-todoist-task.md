@@ -65,10 +65,13 @@ Do NOT start implementing. Wait for the user to comment on the plan or approve i
 
 ## Phase 5: Isolated environment (only after plan approval)
 
-When the user approves the plan and implementation begins, check whether the repo has `scripts/agent-env.sh` at its root.
+When the user approves the plan and implementation begins, do the work in an **isolated agent environment**. Invoke the **`agent-environments` skill** and let it own the mechanics: it detects whether the repo already has an environment system, knows the per-stack and sub-component specifics (e.g. a WordPress theme/plugin nested in a full install), and enforces the cardinal rules. Do NOT re-encode the detection or the worktree/provision/serve commands here; that all lives in the skill.
 
-- **If it exists**: before touching any code, move into an isolated agent environment. Call `EnterWorktree` with a meaningful task-derived kebab-case name (per global worktree naming conventions), then run `./scripts/agent-env.sh provision`. Implement, test, and PR from inside that environment, following the repo CLAUDE.md's "Agent Environments" rules (in particular: use the script's `serve` command, never `npm run dev`, inside an env).
-- **If it doesn't exist**: implement in place as usual. This phase is a no-op in repos without the script.
+Policy for this command:
+- **If the repo already has an environment system**: operate it as the skill directs (create or adopt an env for this task), then implement, test, and PR from inside it.
+- **If it does not**: ask the user before setting one up ("This repo has no agent-environment system. Set one up for isolated work, or implement in place?"). Run the skill's setup path only if they agree; otherwise implement in place. Setup is one-time per repo, so later tasks won't re-prompt.
+
+Once inside an env, follow the skill's cardinal rules (run the env's own `serve`, never the project's main dev command, while inside an env; re-anchor after any interruption; tear down only via the guarded `destroy`).
 
 ## Notes
 
