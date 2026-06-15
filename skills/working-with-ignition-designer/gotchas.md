@@ -293,31 +293,101 @@ A view-scope custom prop like `view.custom.selectedRow` (set from `onRowClick`) 
 
 Reading `props.data` immediately after bumping `refreshNonce` races the refresh; the DB-query path avoids the timing concern entirely. _Discovered: 2026-05-28_
 
-### `ia.container.tab`: embed views via CHILDREN (by index) + `tabs[]` for labels — `viewPath` is ignored when `text` is set
-The Tab Container has two ways to fill a tab, and they fight each other. Each
-entry in `props.tabs[]` may carry `text` (header label), `viewPath`,
-`viewParams`, `runWhileHidden`, `disabled`. **But if a tab object has BOTH
-`text` and `viewPath`, the `viewPath` is silently ignored**: you get a labeled
-tab with an empty body (no error, no console warning). There is no separate
-"header label" field distinct from `text`.
+### `ia.container.tab`: `tabs[].viewPath` renders a view as the HEADER, not the pane; hand-authored child panes only render the first tab
+The Tab Container's `props.tabs[]` entries configure the tab HEADERS, not the
+content panes. Each entry may carry `text` (header label), `viewPath`,
+`viewParams`, `runWhileHidden`, `disabled`. Verified on 8.3.4 by headless test:
 
-The working pattern for labeled tabs that embed views: put one **child**
-component per tab in the container's `children` array (mapped to tabs **by
-index**), and use `tabs[].text` only for the labels. Embed each view with an
-`ia.display.view` child (`props.path`, `props.params`):
-```json
-"root": {
-  "type": "ia.container.tab",
-  "props": { "tabs": [ {"text": "Checkout"}, {"text": "Restock"} ] },
-  "children": [
-    { "type": "ia.display.view", "props": { "path": "checkout/checkout_sm" } },
-    { "type": "ia.display.view", "props": { "path": "store/placeholder_sm", "params": {"label": "Restock"} } }
-  ]
-}
-```
-(`tabs[].viewPath` is only a label-less shortcut: a tab with `viewPath` and no
-`text` embeds the view but you lose control of the header text.) The root of a
-view can itself be the tab container. _Discovered: 2026-06-02_
+- `text` sets the header label (plain text button).
+- `viewPath` (with no `text`) renders that whole VIEW *as the tab header*, i.e.
+  the view's content ends up crammed into the clickable tab button, not the
+  body. If both `text` and `viewPath` are set, `viewPath` is ignored. So
+  `viewPath` is for fancy custom tab buttons, NOT for putting a view in the tab.
+
+The tab BODY/pane is supposed to come from the container's `children` (one per
+tab, by index), but **hand-authoring those children in `view.json` only
+rendered the FIRST tab's child**: the single `.content-frame` showed child[0]
+for tab 0 and stayed empty for every other tab, even with a bare label as the
+child (so it is not a per-embedded-view problem). Net: a hand-authored tab
+container with `tabs[].text` + a child per tab reliably renders only the first
+tab; the rest are blank.
+
+To get real content in every tab, build the tabs in DESIGNER (deep-select the
+container and drop an embedded view onto each tab) so the panes associate
+correctly, rather than hand-authoring the `children` array. The root of a view
+can itself be the tab container. _Discovered: 2026-06-02 (corrected same day after headless verification)_
+
+### A focused button + a barcode scanner = the scan's Enter re-fires the button
+A Perspective form that mixes `ia.input.barcodescannerinput` with action buttons
+(Submit, Clear) has a focus trap: after the user clicks a button, that button
+keeps DOM focus, and the scanner's terminating **Enter keystroke also activates
+the focused button**. Symptoms: after clicking Clear or Submit, the next scan
+re-runs that button's `onActionPerformed`. For example you can never advance
+from the part field to the location field (every scan re-clears first), or a
+second submit fires on the next scan. The scanner captures keystrokes globally,
+so this happens regardless of where the scan value is routed.
+
+**Fix:** at the end of each button's `onActionPerformed`, move focus off the
+button. Focusing the root container is the documented blur workaround:
+`self.parent.parent.focus()` (walk up to the view root) or
+`self.view.rootContainer.focus()`. `.focus()` works on focusable components and
+on the root container; `self.blur()` on the button is unreliable. _Discovered: 2026-06-02_
+
+### Multiple `ia.input.barcodescannerinput` coexist on one screen via PREFIX/SUFFIX, not regex
+Two (or more) barcode scanner inputs CAN live on the same view, each capturing
+only its own barcode type, IF the types are distinguishable and you pick the
+right mode. Each scanner independently watches the global keystroke stream; a
+scan it does not recognize is ignored by that scanner.
+
+- **regex mode is fragile for this.** The component accumulates keystrokes in a
+  rolling buffer and does NOT flush it after a non-matching scan, so scans meant
+  for the OTHER scanner pile up and corrupt the next real match (an anchored
+  `^...$` regex makes the corruption sticky). Verified empirically: two scanners
+  with `(\d+)Enter` and `([A-Za-z]+-\d+-\d+)Enter` cross-contaminated on
+  rapid/interleaved scans. A purely numeric code is the worst case (an unanchored
+  `(\d+)` grabs the trailing digits of a dashed location like `SB-2-4`).
+- **prefix/suffix mode is the robust discriminator.** Encode a distinct prefix
+  per type in the labels and set `props.prefix`/`props.suffix` per scanner (e.g.
+  part = prefix `$` suffix `!`; location = prefix `@` suffix `!`). The component
+  keys on the delimiters (no regex buffer), so there is no cross-contamination.
+  When `prefix` or `suffix` is set, `regex` is ignored, and no Enter terminator
+  is needed (the suffix ends the scan). Verified clean discrimination with rapid
+  + interleaved scans.
+
+The encoding (what prefix/suffix the labels carry) is a labeling decision the
+customer owns, so confirm it before wiring the scanners. Driving prefix/suffix
+scanners headless: type the whole encoded string (`$18!`, `@SB-2-4!`) globally,
+no click and no Enter. _Discovered: 2026-06-03_
+
+### Mobile camera barcode scanning is a separate path: Scan Barcode action + Barcode Scanned session event (Perspective App only)
+The `ia.input.barcodescannerinput` component is for keyboard-wedge scanners. To
+scan with a phone camera you use a different mechanism: a **Scan Barcode**
+Perspective App action (on a button's onClick; renders on disk as a
+`native/barcode` DOM event action) opens the device camera, and the result fires
+the project's **Barcode Scanned** session event. The handler signature is
+`onBarcodeDataReceived(session, data, context)`; the scanned payload is the
+**`data`** param (a dict-like object: `data.text`, `data.timestamp`,
+`data.barcodeType`), NOT a name called `event`. Referencing `event.text` raises a
+silent `NameError` per scan (visible only in the gateway log) so the camera opens,
+reads, and closes but nothing reaches the client. This works ONLY in the native Ignition
+Perspective App, NOT a mobile web browser, so it cannot be exercised by the
+headless Playwright driver, it needs on-device testing.
+
+To feed the same fields as the wedge scanners, relay it: the session event
+writes `session.custom.<x> = data.text`; the view binds a `view.custom` prop to
+that session prop with an onChange that parses + routes the value into the form's
+fields. If the barcodes carry a type prefix, route by prefix so one camera
+button handles every field. Caveat: the relay's onChange only fires when the
+bound value CHANGES, so scanning the identical barcode twice in a row would be a
+no-op. To make repeated identical scans re-fire, keep `lastScan` a **string** and
+have the view's onChange reset it (`self.session.custom.lastScan = ''`) after
+routing, so the next identical scan is again a change. Do NOT switch the prop to a
+dict to force the change: an object-typed session prop comes back to gateway
+scripts as a `java.util.HashMap` whose values are wrapped `QualifiedValue`s (e.g.
+`v['text']` reprs as `[$1!, Good, <ts>]`, not `'$1!'`), so `isinstance(v, dict)`
+is False and `routeScan` gets a non-string and throws `'...HashMap' object has no
+attribute 'strip'`. A scalar string prop comes back as clean unicode.
+_Discovered: 2026-06-03_
 
 ### `self` in a component event handler is the COMPONENT
 Not the view. Use `self.view` to reach view-scope state (`self.view.custom.search`,
