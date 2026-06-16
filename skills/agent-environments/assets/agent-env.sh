@@ -13,6 +13,7 @@
 #   agent-env.sh create <name> [base-ref] [--resume]  # worktree + branch + provision
 #                                          # --resume reattaches an existing branch
 #   agent-env.sh provision [path]          # provision an existing worktree (default: cwd)
+#   agent-env.sh run <name|path> -- <cmd...>  # run a command IN the env, cwd-independent
 #   agent-env.sh serve <name|path> [--main-ports]
 #   agent-env.sh stop <name|path>
 #   agent-env.sh list
@@ -588,6 +589,24 @@ cmd_destroy() {
   say "destroyed '$name' (slot ${slot:-?} freed)"
 }
 
+# run — execute a command IN an env, independent of the shell's cwd. This is the
+# mechanical fix for the silent cwd-drift trap: after a restart/resume the agent's
+# Bash cwd can reset to the main checkout, so a bare `npm test` / `git diff` runs
+# against the wrong tree and reports a false result. `agent-env.sh run <name> -- npm
+# test` always runs in the env. exec replaces this shell, so the command's exit code
+# and signals pass straight through. Shell features (pipes, inline env) need an
+# explicit shell: `run <name> -- bash -lc '...'`.
+cmd_run() {
+  local main env name
+  main=$(main_root)
+  name="${1:-}"; [[ -n "$name" ]] || die "usage: agent-env.sh run <name|path> -- <command...>"
+  shift
+  [[ "${1:-}" == "--" ]] && shift   # optional separator
+  [[ $# -gt 0 ]] || die "run: no command given (agent-env.sh run <name> -- <command...>)"
+  env=$(resolve_env "$name" "$main")
+  cd "$env" && exec "$@"
+}
+
 usage() {
   sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
@@ -598,6 +617,7 @@ cmd="${1:-}"
 case "$cmd" in
   create)    cmd_create "$@" ;;
   provision) cmd_provision "$@" ;;
+  run)       cmd_run "$@" ;;
   serve)     cmd_serve "$@" ;;
   stop)      cmd_stop "$@" ;;
   list)      cmd_list "$@" ;;

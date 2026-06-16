@@ -61,6 +61,7 @@ package scripts for the exact wrappers):
 |---|---|
 | `scripts/agent-env.sh create <name>` | New worktree + canonical branch + provision |
 | `scripts/agent-env.sh provision [path]` | Provision an existing worktree (idempotent) |
+| `scripts/agent-env.sh run <name> -- <cmd>` | Run a command **in** the env regardless of the shell's cwd (the re-anchor fix) |
 | `scripts/agent-env.sh serve <name>` | Start the env's dev stack on its own ports (background, health-checked) |
 | `scripts/agent-env.sh stop <name>` | Stop that env's dev stack |
 | `scripts/agent-env.sh list` | All envs: branch / dirty / unpushed / ports / serving |
@@ -86,9 +87,35 @@ CLAUDE.md too. The reasoning:
   the Bash cwd back to the main checkout on the default branch. Then an env
   `npm test` / `git diff` runs against the **wrong code** and reports a false
   result: a passing suite for code you didn't change, an empty `main...HEAD`
-  diff. Before any test, build, or commit after an interruption, verify `pwd`
-  and `git branch --show-current`, and prefer `git -C <worktree>` or an explicit
-  `cd` into the env over trusting the cwd.
+  diff. The mechanical fix is `agent-env.sh run <name> -- <cmd>`: it resolves the
+  env dir and `cd`s into it before running, so verification is cwd-independent no
+  matter where the shell landed. Prefer it for every cwd-relative command after an
+  interruption (`run <name> -- npm test`, `run <name> -- git diff`). It `exec`s the
+  command directly, so shell features (pipes, inline env) need `run <name> -- bash
+  -lc '...'`. As a fallback for what `run` doesn't cover, verify `pwd` and
+  `git branch --show-current`, then prefer `git -C <worktree>` or an explicit `cd`
+  into the env over trusting the cwd. Optional belt-and-suspenders: wire
+  `assets/session-start-reanchor.sh` as a project `SessionStart` hook so a resumed
+  session is reminded automatically — it lists the provisioned envs and the `run`
+  form, and prints nothing when none exist.
+- **Re-root file-tool paths to the worktree after `EnterWorktree`.** This is a
+  distinct trap from the cwd reset above, and it bites in the *opposite*
+  direction. `EnterWorktree` moves the session cwd, but it does **not** rewrite
+  *absolute* paths — and the file tools (Read/Edit/Write) take absolute paths.
+  Any path you captured by Reading a file during planning (before entering the
+  worktree) still points at the **main checkout**. Reuse it in an Edit/Write and
+  the change lands on `main`: because the worktree mirrors the tree, the path
+  exists, the write succeeds with no error, and the worktree's `npm test` then
+  validates unchanged code (a green suite for code you didn't change). After
+  entering a worktree, derive every file-tool path from the worktree root; don't
+  reuse planning-phase absolute paths. Verify once after your first edits:
+  `git -C <worktree> status` shows them and `git -C <main> status` is clean. A
+  `PreToolUse` hook (`assets/worktree-edit-guard.cjs`, wired in
+  `~/.claude/settings.json`) blocks main-checkout edits from a worktree session
+  as a backstop, but it loads at session start and is best-effort — know the
+  rule. (Recovery if it already happened: the changes are uncommitted on `main`;
+  `git -C <main> stash push -- <files>` then `git -C <worktree> stash pop` moves
+  them onto the branch and leaves `main` clean — worktrees share one stash list.)
 - **What you can verify in an env**: unit/integration tests, builds, and
   curl/supertest against the env's own ports. Anything pinned to a **fixed
   external address** (a sideloaded manifest, an OAuth redirect URI, a webhook,
@@ -108,6 +135,37 @@ CLAUDE.md too. The reasoning:
 - **Don't hand-rename env branches.** `provision` owns and enforces the canonical
   name (`worktree-<name>` by default) in the one place both creation paths run
   through, so they can't diverge.
+
+### The pre-PR workflow (in an env)
+
+Once the implementation is done and verified in the env, run this sequence
+**before** opening a PR. The point: land the quality, security, and review
+passes while still isolated in the env, and stop at the PR boundary so the
+human decides when to publish. Don't stop *before* these steps (a common
+mistake) — only stop before the PR itself.
+
+1. **Verify** — the env's own test + build commands, via `run <name> -- <cmd>`.
+2. **`/simplify`** — quality cleanup of the diff (reuse, dead code, altitude).
+3. **`/security-review-plus`** — *if warranted*. It's cheap, so the bar is low:
+   run it whenever anything remotely security-relevant was touched (auth, input
+   handling, network calls, file I/O, crypto, headers, middleware, rate limiting).
+   Skip only for plainly non-security diffs (pure CSS, a variable rename, docs).
+4. **`/review-with-codex`** — automated review cycles until clean.
+5. **`/manual-qa`** — exercise the change end-to-end. Default: **drive it
+   yourself headlessly** — start the env's `serve` and hit it with `curl` for
+   HTTP/back-end changes, or write *temporary* Playwright tests for UI (run
+   them, do **not** commit them; if no headless browser is installed, suggest
+   installing one). Don't use Preview or Claude-in-Chrome — too slow. If the UI
+   genuinely can't be driven headlessly because it renders inside a host app
+   (Outlook, an IDE, a mobile shell), produce the QA procedure and hand it to
+   the user to drive instead.
+6. **STOP before the PR.** Do not `git commit` / push / `gh pr create` unless
+   the user asks. Report what steps 2–5 found and wait.
+
+**Projects override these defaults.** A project's CLAUDE.md is authoritative: it
+can pin which steps apply and how — e.g. "`/manual-qa` here must be user-driven
+because the UI only renders in Outlook", or "skip `/review-with-codex`". When the
+project's own section says something different, follow the project, not this default.
 
 ## Setting up in a new project
 
@@ -231,6 +289,14 @@ itself is validated; this confirms your per-project functions are wired right.
 - [`assets/agent-env.sh`](assets/agent-env.sh): the reference script: fenced
   per-project section (worked Node/Vite example) over a stack-agnostic engine.
 - [`assets/guard-not-in-env.cjs`](assets/guard-not-in-env.cjs): the in-dev guard.
+- [`assets/worktree-edit-guard.cjs`](assets/worktree-edit-guard.cjs): a `PreToolUse`
+  hook (wired in `~/.claude/settings.json`) that blocks Edit/Write/MultiEdit to
+  the main checkout while the session is in an agent-env worktree — the backstop
+  for the "re-root file-tool paths" cardinal rule. Fails open.
+- [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh): an optional
+  `SessionStart` hook that reminds a resumed session to verify via `agent-env.sh run
+  <name> -- <cmd>` when provisioned envs exist — the proactive companion to the
+  re-anchor cardinal rule. Self-contained, silent when no envs exist, always exits 0.
 - [`assets/claudemd-section.md`](assets/claudemd-section.md): templated CLAUDE.md
   section (the thin always-loaded layer).
 - [`references/stacks.md`](references/stacks.md): per-knob and per-stack

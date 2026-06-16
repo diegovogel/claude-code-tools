@@ -30,9 +30,12 @@ queue worker." >
 - **Re-anchor after any restart or interruption.** A Claude restart drops the
   `EnterWorktree` tracking AND can silently reset the Bash cwd back to the main
   checkout on the default branch, so an env `<TEST_CMD>` / `git diff` can run
-  against the wrong code and report a false result. Before tests, builds, or
-  commits after any interruption, verify `pwd` and `git branch --show-current`,
-  and prefer `git -C <worktree>` or an explicit `cd` into the env.
+  against the wrong code and report a false result. The mechanical fix: run env
+  verification through `./scripts/agent-env.sh run <name> -- <cmd>` (e.g.
+  `... run <name> -- <TEST_CMD>`), which `cd`s into the env first, so the result
+  is cwd-independent. Use it for any cwd-relative command after an interruption.
+  Fallback for what `run` doesn't cover: verify `pwd` and `git branch
+  --show-current`, then prefer `git -C <worktree>` or an explicit `cd` into the env.
 - **Verification scope in an env**: `<TEST_CMD>`, `<BUILD_CMD>`, curl/supertest
   against the env's own ports. <Anything pinned to a fixed external address can't
   run on env ports, describe it: e.g. "Real-Outlook e2e can't run against env
@@ -44,6 +47,13 @@ queue worker." >
   (shorthand for `./scripts/agent-env.sh serve <name> --main-ports`). When done,
   `<npm run stop <name>>` releases the main ports. <Delete if no fixed-address
   integration. >
+- **Pre-PR workflow**: before opening a PR, run the agent-environments skill's
+  pre-PR workflow, then **stop before the PR** — don't commit/push/`gh pr create`
+  unless asked. The skill owns the step list; load it rather than restating the
+  steps here, so the two can't drift. <PROJECT OVERRIDES, if any: e.g.
+  "`/manual-qa` must be user-driven — the UI only renders in `<HOST_APP>`, so
+  generate the procedure and hand it off rather than driving a headless browser."
+  Delete if none. >
 - **Cleanup**: after merge, `<npm run destroy <name>>`. It refuses to remove
   anything dirty or unpushed (commits survive in the main repo's `.git`
   regardless). Merged branches are deleted automatically so the name can be

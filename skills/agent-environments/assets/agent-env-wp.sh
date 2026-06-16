@@ -14,6 +14,7 @@
 #
 # Usage:
 #   agent-env-wp.sh create <name> [base-ref]   # clone install + worktree + DB + config
+#   agent-env-wp.sh run <name> -- <cmd...>     # run a command IN the env's worktree, cwd-independent
 #   agent-env-wp.sh serve <name>               # wp server (+ asset watcher) on the env's port
 #   agent-env-wp.sh stop <name>
 #   agent-env-wp.sh list
@@ -231,6 +232,21 @@ load_env() { # name -> sources meta.env
   source "$ed/meta.env"
 }
 
+# run — execute a command IN the env's code worktree, independent of the shell's
+# cwd. The cwd-drift fix (see agent-env.sh): after a restart/resume the agent's
+# Bash cwd can reset to the source checkout, so a bare `npm test` / `composer test`
+# runs against the wrong tree. This runs in the swapped-in theme/plugin worktree
+# ($AGENT_ENV_INSTALL/$AGENT_ENV_REL), where you edit and test. exec passes the
+# exit code/signals through; shell features need `run <name> -- bash -lc '...'`.
+cmd_run() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: agent-env-wp.sh run <name> -- <command...>"
+  shift
+  [[ "${1:-}" == "--" ]] && shift   # optional separator
+  [[ $# -gt 0 ]] || die "run: no command given (agent-env-wp.sh run <name> -- <command...>)"
+  load_env "$name"
+  cd "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" && exec "$@"
+}
+
 cmd_serve() {
   local name="${1:-}"; [[ -n "$name" ]] || die "usage: serve <name>"
   load_env "$name"
@@ -327,6 +343,7 @@ cmd_destroy() {
 cmd="${1:-}"; [[ -n "$cmd" ]] && shift || { sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 case "$cmd" in
   create)  cmd_create "$@" ;;
+  run)     cmd_run "$@" ;;
   serve)   cmd_serve "$@" ;;
   stop)    cmd_stop "$@" ;;
   list)    cmd_list "$@" ;;
