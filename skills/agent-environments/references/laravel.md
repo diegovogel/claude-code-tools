@@ -62,6 +62,10 @@ db_token() { printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_'; }   # env name -> SQL-saf
 # --- seed: vendor (Composer) + node_modules (CoW), reconcile against lockfiles
 project_seed_env_files() {
   local main="$1" env="$2"
+  # Composer needs private-registry creds (e.g. Flux Pro) for any install, and
+  # auth.json is git-ignored so the worktree never has it — seed it before
+  # composer runs, or installs 401. Read-only creds, safe to copy.
+  [[ -f "$main/auth.json" && ! -f "$env/auth.json" ]] && cp "$main/auth.json" "$env/auth.json"
   if [[ ! -d "$env/vendor" ]]; then
     if [[ -d "$main/vendor" ]] && clone_dir "$main/vendor" "$env/vendor"; then :; else
       rm -rf "$env/vendor"; ( cd "$env" && composer install --no-interaction --no-progress )

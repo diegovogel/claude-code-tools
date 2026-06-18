@@ -191,12 +191,16 @@ full non-Node fill-in see [`references/laravel.md`](references/laravel.md)):
 
 1. **Dependency dirs** to CoW-clone (`node_modules`, `vendor`, `.venv`, …) and
    the lockfile-reconcile command.
-2. **Local artifacts** to seed (dev certs, fixtures), secrets to *not* copy, and
-   **gitignored generated build artifacts** (codegen output: proto/gRPC stubs,
-   generated API clients, route trees). A fresh worktree lacks them and they aren't
-   inside the dependency dirs, so regenerate them in `project_after_provision` —
-   else whatever imports them breaks in-env while passing on the main checkout,
-   which already has them.
+2. **Local artifacts** to seed (dev certs, fixtures, and **git-ignored
+   package-manager credentials** like Composer `auth.json` or npm `.npmrc` tokens
+   that private-registry installs need — git-ignored, so `provision` won't copy
+   them, and a `require`/`install` in the env 401s without them), runtime secrets
+   to *not* copy, and **gitignored generated build artifacts** (codegen output:
+   proto/gRPC stubs, generated API clients, route trees). A fresh worktree lacks
+   them and they aren't inside the dependency dirs, so seed credentials in
+   `project_seed_env_files` and regenerate build artifacts in
+   `project_after_provision` — else whatever imports them breaks in-env while
+   passing on the main checkout, which already has them.
 3. **Port count + config keys**: how many ports the dev stack binds, and the keys
    that name them.
 4. **Dev/serve launch**: how to start the app for local dev (often several

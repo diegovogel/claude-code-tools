@@ -27,7 +27,7 @@ the line: the skill provides the machinery; you supply these.
 |---|---|---|
 | Dependency dirs to clone | `project_seed_env_files` | What does a fresh checkout install that's slow/large? (`node_modules`, `vendor`, `.venv`, `target`) |
 | Lockfile reconcile | `project_seed_env_files` | The "install from lockfile" command (`npm ci`, `composer install`, `uv sync`) |
-| Local artifacts to seed | `project_seed_env_files` | Dev certs, fixtures the app reads but git ignores |
+| Local artifacts to seed | `project_seed_env_files` | Dev certs, fixtures the app reads but git ignores, and git-ignored package-manager credentials (Composer `auth.json`, npm `.npmrc`) that private-registry installs need |
 | Port count + config keys | `PORTS_PER_ENV`, `project_env_port_lines` | How many ports does the dev stack bind? What config keys name them? |
 | Dev/serve launch | `project_start_servers`, `project_health_urls` | How do you start the app for local dev, and what URL means "up"? |
 | Stateful services (create) | `project_after_provision` | Does each env need its own DB / queue / cache to not corrupt the others? |
@@ -56,6 +56,17 @@ The whole speed win is CoW-cloning the dependency tree instead of reinstalling.
 Reconcile against the **env branch's own lockfile**, not main's, a branch that
 changed dependencies must get them. The example does this with a `cmp` of the
 lockfile then a conditional install.
+
+**Seed git-ignored package-manager credentials, or in-env installs 401.**
+Private-registry auth lives in git-ignored files (Composer `auth.json`, npm
+`.npmrc` tokens, `~/.netrc`, `pip.conf`, Cargo registry tokens). The worktree
+doesn't inherit them, so the moment a branch adds or updates a dep, the reconcile
+step's `install`/`require` hits the private registry and fails with a confusing
+"must authenticate" / 401 error. Copy these from the main checkout in
+`project_seed_env_files`. They're read-only credentials, so copying is safe
+(unlike the rotating secret store below). Easy to miss, because a pure CoW clone
+with no dependency changes needs no auth — it only bites the first time someone
+runs `require`/`install` in an env.
 
 Never CoW-copy a **shared mutable secret store** that two running servers would
 fight over (e.g. an OAuth refresh-token file that rotates on use, two servers
