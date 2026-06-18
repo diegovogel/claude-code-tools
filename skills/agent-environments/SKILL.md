@@ -191,11 +191,19 @@ full non-Node fill-in see [`references/laravel.md`](references/laravel.md)):
 
 1. **Dependency dirs** to CoW-clone (`node_modules`, `vendor`, `.venv`, …) and
    the lockfile-reconcile command.
-2. **Local artifacts** to seed (dev certs, fixtures), and secrets to *not* copy.
+2. **Local artifacts** to seed (dev certs, fixtures), secrets to *not* copy, and
+   **gitignored generated build artifacts** (codegen output: proto/gRPC stubs,
+   generated API clients, route trees). A fresh worktree lacks them and they aren't
+   inside the dependency dirs, so regenerate them in `project_after_provision` —
+   else whatever imports them breaks in-env while passing on the main checkout,
+   which already has them.
 3. **Port count + config keys**: how many ports the dev stack binds, and the keys
    that name them.
 4. **Dev/serve launch**: how to start the app for local dev (often several
-   processes), and the URL(s) that mean "up".
+   processes), and the URL(s) that mean "up". Note whether the **test suite needs
+   that running server** (E2E/browser tests usually do): if so, the env must serve
+   it, and any port or baseURL the suite or dev server hardcodes becomes a blocker
+   to fix backward-compatibly (see step 8 and `references/stacks.md`).
 5. **Stateful services to create**: does each env need its own DB / cache / queue /
    index so parallel runs don't corrupt each other? The axis that most changes the
    work. Many stacks need it; the Node example needs none.
@@ -257,12 +265,53 @@ Ensure these are gitignored: the config file the managed block writes to (e.g.
 config file must be gitignored**. Otherwise provision's managed-block edit
 shows the worktree as dirty and the destroy guard blocks cleanup.
 
-### 7. Smoke-test
+### 7. Smoke-test — and prove the FULL test suite runs in an env
 
 From the main checkout: `create <name>` → `list` (confirm distinct ports, the
-env shows up) → `provision <name>` again (idempotent) → if feasible,
-`serve <name>` then hit a health URL then `stop` → `destroy <name>`. The engine
-itself is validated; this confirms your per-project functions are wired right.
+env shows up) → `provision <name>` again (idempotent) → `serve <name>` then hit a
+health URL → `stop`. That validates your per-project functions are wired right.
+
+Then prove the goal that matters most: **an env can run the project's _entire_
+test suite, including E2E if one exists.** Run each suite in the env —
+`agent-env.sh run <name> -- <unit/integration cmd>`, and for E2E, `serve` the env
+and run the browser tests against the env's own ports. If everything passes,
+`destroy <name>` and you're done. If the full suite does NOT run in-env, go to
+step 8 — don't ship a setup where agents can only run part of the suite, since
+"tests pass" then silently means "the tests that happen to work in isolation."
+
+### 8. Make the full test suite runnable in an env (backward-compatibly)
+
+If step 7 showed the suite can't fully run in-env (most often the E2E suite,
+because it needs the dev server), the blocker lives in the project's own source —
+the engine can't fix it from outside. Patch the project, but **only in a
+backward-compatible way**, this is the hard requirement: anyone who pulls the
+change MUST still run the full suite on the **main checkout**, **without this
+skill**, **without editing their `.env`**. The pattern is always the same — gate
+the new behavior behind an env var that DEFAULTS to today's exact behavior, and
+have `serve` / the in-env test flow set that var. The three blockers:
+
+- **The dev server binds a hidden fixed global port** — a devtools / HMR /
+  telemetry / event-bus server on a hardcoded port, *separate* from the port you
+  pass the dev server. Two dev servers then collide (across envs, often within one
+  env), and you can't relocate it from outside. Gate it in the app's dev-server
+  config behind an env var and set that var in `project_start_servers`, e.g.
+  `devtools(process.env.APP_NO_DEVTOOLS ? { eventBusConfig: { enabled: false } } : undefined)`.
+  Unset = unchanged.
+- **The test runner hardcodes a baseURL/port** (Playwright `baseURL` /
+  `webServer.url` / a global-setup URL; Cypress `baseUrl`). Read them from an env
+  var defaulting to today's value —
+  `const BASE = process.env.E2E_BASE_URL ?? "http://localhost:3000"` — and when the
+  var is set, also skip the runner's own server-management (the env's `serve`
+  already provides the server; otherwise the runner starts a second one on the main
+  port). Record the per-env value in the managed `.env` block so the in-env flow can
+  `source` it.
+- **Gitignored generated artifacts are missing** (knob 2): regenerate in
+  `project_after_provision`. No app change needed.
+
+After patching, re-run step 7's full-suite check in a *fresh* env (so you exercise
+provisioning, not a hand-fixed worktree), and document the in-env E2E command in
+the CLAUDE.md section so agents can find it. See `references/stacks.md`
+("Dev-server-dependent tests") for the worked patterns.
 
 ## How it works (the load-bearing design choices)
 

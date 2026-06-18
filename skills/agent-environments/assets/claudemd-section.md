@@ -36,12 +36,13 @@ queue worker." >
   is cwd-independent. Use it for any cwd-relative command after an interruption.
   Fallback for what `run` doesn't cover: verify `pwd` and `git branch
   --show-current`, then prefer `git -C <worktree>` or an explicit `cd` into the env.
-- **Verification scope in an env**: `<TEST_CMD>`, `<BUILD_CMD>`, curl/supertest
-  against the env's own ports. <Anything pinned to a fixed external address can't
-  run on env ports, describe it: e.g. "Real-Outlook e2e can't run against env
-  ports (the sideloaded manifest + SSO Application ID URI are pinned to
-  localhost:13000); use takeover QA below or the main checkout." Delete this
-  bullet if the project has no fixed-address integration. >
+- **Verification scope in an env**: the **full** suite should run in-env — `<TEST_CMD>`,
+  `<BUILD_CMD>`, and the **E2E** suite if one exists (`serve` the env, then run the
+  browser tests against its own ports; describe the exact command). <If E2E needed a
+  project patch to run in-env, say so and link it. Only a GENUINELY fixed-address
+  integration can't run on env ports — describe it, e.g. "Real-Outlook e2e is pinned
+  to a sideloaded manifest + SSO Application ID URI at localhost:13000; use takeover
+  QA or the main checkout." Delete that caveat if there's no fixed-address integration. >
 - **Takeover QA** (testing an env's branch through the fixed external integration):
   stop the main dev server, then `<npm run serve <name>>` from the main checkout
   (shorthand for `./scripts/agent-env.sh serve <name> --main-ports`). When done,

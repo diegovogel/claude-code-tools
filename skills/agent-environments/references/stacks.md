@@ -46,9 +46,11 @@ that must be unique per env (a `<base>_<name>` database, a per-env key prefix).
 The whole speed win is CoW-cloning the dependency tree instead of reinstalling.
 `clone_dir` (in the engine) already handles the OS split; you just name the dirs.
 
-- **Node**: `node_modules`. Reconcile with `npm ci` (fresh) / `npm install` (branch changed deps). Worked example ships in the script.
+- **Node**: `node_modules`. Reconcile with `npm ci` (fresh) / `npm install` (branch changed deps). Worked example ships in the script. **Monorepos** (pnpm/yarn/npm workspaces) keep a `node_modules` at the root **and** one per workspace package — clone them all (a real pnpm-workspace setup needed all 7). The internal links pnpm/yarn create are relative, so they resolve inside the env once every `node_modules` is cloned; clone only the root and the per-package symlinks dangle.
 - **PHP/Laravel**: `vendor` (Composer) **and** usually `node_modules` (Vite/Mix assets). Reconcile with `composer install` and `npm ci`.
-- **Python**: `.venv` (or wherever the venv lives). Reconcile with `uv sync` / `pip install -r requirements.txt`. Note: a venv contains absolute paths in some activate scripts and `pyvenv.cfg`; a CoW clone keeps the *original* paths. Usually fine because the worktree runs the same interpreter, but if activation misbehaves, fall back to recreating the venv per env.
+- **Python**: `.venv` (or wherever the venv lives). Reconcile with `uv sync` / `pip install -r requirements.txt`. A CoW-cloned venv keeps the *source* checkout's absolute paths, which bites in two non-obvious ways beyond activation scripts / `pyvenv.cfg`:
+  - **Editable installs (`pip install -e`) keep pointing at the source tree.** The `.pth`/finder the editable install wrote holds an absolute path to the *main* checkout's package dir, so `import yourpkg` in the env silently resolves to main's code — no error, just broken isolation (the env's tests pass against code you never changed). Re-run `pip install -e .` in `project_after_provision` to repoint it at the env (also picks up deps the branch added). Confirmed live: after the repoint, the package imported from the worktree, not the main checkout.
+  - **Console-script shebangs point at the source venv's python.** `bin/pip`, `bin/pytest`, … are scripts whose `#!` line is the absolute path to the venv's python *at creation time* (the main checkout), so running `env/.venv/bin/pip` execs main's interpreter and installs into main's venv. Always invoke tools as `.venv/bin/python -m pip` / `-m pytest`: `bin/python` is a symlink whose prefix resolves from its own location, so it picks the env's venv. (If activation still misbehaves, recreate the venv per env.)
 - **Rust**: `target` is large and CoW-clones well; deps are global in `~/.cargo` so often nothing to clone but `target` for warm incremental builds.
 
 Reconcile against the **env branch's own lockfile**, not main's, a branch that
@@ -152,6 +154,63 @@ in parallel. Three traps, all hit in real projects:
   [`wordpress.md`](wordpress.md)), and why the Laravel example prefers Mix `watch`
   over `hot` (see [`laravel.md`](laravel.md)).
 
+## Dev-server-dependent tests (E2E) in an env
+
+A unit suite usually runs in an env with zero extra work (no ports, no server).
+The suite that *fights* the env model is the one that drives a **running app** —
+Playwright/Cypress E2E. The whole point of agent envs is that an agent can verify
+its work, and "the full suite" includes E2E, so getting E2E to run in-env (and in
+parallel) matters. Three blockers recur, and none can be fixed from the script
+alone — they live in the project's own source. The fix for each is a
+**backward-compatible** project patch: gate new behavior behind an env var that
+defaults to today's behavior, and set that var only from `serve` / the in-env test
+flow. The invariant: a teammate who pulls the change still runs the full suite on
+the main checkout, without this skill, without `.env` edits.
+
+1. **The dev server binds a hidden fixed global port.** Modern dev servers often
+   start a *second* server on a hardcoded port for devtools / HMR / an event bus,
+   independent of the `--port` you pass. Example seen in the wild: TanStack Start's
+   `devtools()` Vite plugin starts an event bus on a fixed `42069`, so two `vite
+   dev` processes collide even within one env (and the failure — `EADDRINUSE
+   :::42069` deep in a plugin — doesn't name itself). You can't relocate it
+   externally; gate it in the vite/webpack config behind an env var and set that var
+   in `project_start_servers`:
+   ```ts
+   // vite.config.ts — default unchanged; serve sets APP_NO_DEVTOOLS=1
+   devtools(process.env.APP_NO_DEVTOOLS ? { eventBusConfig: { enabled: false } } : undefined)
+   ```
+   Disabling devtools is fine for tests; if you'd rather keep them, give the bus a
+   per-env port instead (read it from an env var, reserve one more port per env).
+
+2. **The test runner hardcodes a baseURL/port.** Playwright pins `use.baseURL`,
+   `webServer.url`, and often a `globalSetup` URL to `http://localhost:3000`.
+   Parameterize each from one env var defaulting to today's value, AND skip the
+   runner's own server management when it's set (otherwise Playwright starts a
+   *second* dev server on the main port — which also re-triggers blocker 1):
+   ```ts
+   const BASE_URL = process.env.E2E_BASE_URL ?? "http://localhost:3000";
+   // ...use.baseURL = BASE_URL; globalSetup reads BASE_URL...
+   webServer: process.env.E2E_BASE_URL
+     ? undefined                                   // env's `serve` already runs it
+     : { command: "pnpm run dev", url: BASE_URL, reuseExistingServer: true },
+   ```
+   Write the per-env `E2E_BASE_URL=http://localhost:<web port>` into the managed
+   `.env` block (`project_env_port_lines`) so the in-env flow can `source .env` and
+   run `playwright test` with no other setup. (Don't rely on `reuseExistingServer`
+   alone to dodge a second server — it probes the URL and is racy; skipping
+   `webServer` outright when the caller owns the server is deterministic.)
+
+3. **Gitignored generated artifacts the app imports.** If codegen output (proto/
+   gRPC stubs, a generated client) is gitignored, a fresh worktree lacks it and the
+   *dev server* 500s on import — so E2E fails with a server error, not a port error.
+   The committed-stub side of the same contract (e.g. Python stubs that are checked
+   in) works, which can mislead. Regenerate in `project_after_provision` (e.g.
+   `moon run proto:build`); see [Dependencies](#dependencies) / knob 2.
+
+Then `serve` the env (API + the one web app the E2E suite targets is enough) and
+run `playwright test` against the env's port. With blocker 1 fixed, every env's
+dev server avoids the shared fixed port, so envs run E2E in parallel.
+
 ## Stateful services
 
 This is the axis that most changes the work. The worked example has **no local
@@ -237,3 +296,20 @@ For a non-Node stack, a shell guard in the dev script works the same way:
   The engine already writes those patterns into `.git/info/exclude` (shared
   across all worktrees) on provision, so this is handled, don't remove it.
 - **`git clean -fdx` at the main root** wipes every nested env. Warn in CLAUDE.md.
+- **A dirty lockfile in the main checkout dirties every env.** The reconcile step
+  compares the env's lockfile to main's *working-tree* lockfile (`cmp "$main/<lock>"
+  "$env/<lock>"`), so an uncommitted lockfile edit in main makes every new env run
+  an install and then read as dirty — `destroy` then refuses without `--force`.
+  Commit or stash the lockfile before spinning up envs. (Seen live: a dirty
+  `pnpm-lock.yaml` made every env reconcile; once committed, fresh envs were clean.)
+- **An app with async graceful shutdown holds its port for a beat after `stop`.**
+  `stop` signals the process group, but a server that drains connections releases
+  its socket a second or two later, so an immediate re-`serve` can hit "port in
+  use." Poll `lsof` until the port frees before re-serving (the engine's own
+  serve-after-stop is fine; this bites manual stop→serve loops).
+- **The script may run under a restricted PATH** (e.g. the Claude sandbox), where
+  only the homebrew dirs the engine prepends are present. If the build tool or
+  language runtime lives elsewhere (moon at `~/.moon/bin`; asdf/proto/mise shims
+  in their own dirs), `project_after_provision`'s codegen/build and
+  `run <name> -- <tool>` fail with "not found." Add the needed bin dirs to PATH in
+  the per-project section (one real setup adds `~/.moon/bin` and `~/.proto/bin`).
