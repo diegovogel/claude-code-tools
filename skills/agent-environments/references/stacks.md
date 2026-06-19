@@ -234,17 +234,29 @@ Give each env its own:
 - **Database**: in `project_after_provision` (which receives the env name + slot),
   create a per-env DB named from the env (e.g. `myapp_<name>`), then migrate and
   seed it; write its name into the config file via `project_env_port_lines` (also
-  given name + slot) so the app connects to the right one. **Teardown**: drop it in
-  `project_pre_destroy` (runs during `destroy`, after the guards pass, before the
-  worktree is removed). File-backed DBs (SQLite) need no teardown, they live in the
-  worktree and vanish with it. See [`laravel.md`](laravel.md) for a worked
-  SQLite + MySQL example.
+  given name + slot) so the app connects to the right one. Creation is per-engine: a
+  fresh `CREATE DATABASE` + migrate/seed; or, when the env needs the *populated* dev
+  data rather than empty seeds, clone an existing DB — **Postgres** `CREATE DATABASE
+  <name> TEMPLATE <source>` (near-instant, but the source must have no open
+  connections), **MySQL** `mysqldump <source> | mysql <name>` (slower). **Teardown**:
+  drop it in `project_pre_destroy` (runs during `destroy`, after the guards pass,
+  before the worktree is removed) — but **assert first that the name you computed is
+  really this env's** (non-empty env token, name ends in that token, and it isn't the
+  base/shared/test DB) and refuse otherwise: a bad `<name>` could collapse the target
+  to the shared dev DB, and the drop is irreversible. File-backed DBs (SQLite) need
+  no teardown, they live in the worktree and vanish with it. See
+  [`laravel.md`](laravel.md) for a worked SQLite + MySQL example.
 - **Redis/cache**: cheapest isolation is a per-env key prefix
   (`REDIS_PREFIX=<name>_`, no limit) or a logical DB index per slot
   (`REDIS_DB=$slot`, but Redis has only 16 by default, so a prefix scales better).
   No new process needed.
 - **Queue/worker**: start it in `project_start_servers` as another background
-  process (another PID file), pointed at the env's own DB/redis.
+  process (another PID file), pointed at the env's own DB / redis prefix. This
+  isolation is load-bearing, not cosmetic: if envs share a queue backend, a worker
+  running from the main checkout (or another env) can drain *this* env's jobs and run
+  them against the wrong DB — usually failing silently, since the job's model IDs
+  don't exist there. Per-env isolation (own DB for the `database` driver, own
+  `REDIS_PREFIX` keyspace for `redis`) means no other worker can see these jobs.
 - **Search (Elastic/Meili/etc.)**: per-env index prefix, created in
   `project_after_provision`.
 
@@ -313,6 +325,15 @@ For a non-Node stack, a shell guard in the dev script works the same way:
   an install and then read as dirty — `destroy` then refuses without `--force`.
   Commit or stash the lockfile before spinning up envs. (Seen live: a dirty
   `pnpm-lock.yaml` made every env reconcile; once committed, fresh envs were clean.)
+- **A directory-named lockfile poisons main's copy.** If a committed lockfile
+  records the project *name* and that name is directory-derived rather than fixed in
+  the manifest, an install run inside a worktree rewrites it to the worktree's
+  directory name; commit + merge then corrupts the main checkout's lockfile. npm is
+  the case to watch: the root `name` in `package-lock.json` falls back to the
+  directory basename when `package.json` has no `name` field, so an env at
+  `.claude/worktrees/foo` writes `"name": "foo"`. Fix once by giving the manifest an
+  explicit `name`. (Cargo, Composer, uv, and Poetry read the name from an explicit
+  manifest field, so they don't drift — it's the directory-inferred ones to watch.)
 - **An app with async graceful shutdown holds its port for a beat after `stop`.**
   `stop` signals the process group, but a server that drains connections releases
   its socket a second or two later, so an immediate re-`serve` can hit "port in

@@ -31,11 +31,14 @@ it like `npm run dev`: name it in `MAIN_DEV_CMD` and guard it.)
 |---|---|---|
 | **SQLite** (modern Laravel default) | free, per-worktree | the env gets its own `database/database.sqlite` (path pinned via `DB_DATABASE`, see gotchas), `touch` + `migrate`. Fully isolated, no shared server. |
 | **MySQL** | per-env schema on the shared server | Herd's MySQL listens on TCP `127.0.0.1:3306` (not the default `/tmp/mysql.sock`). Create `<base>_<env>`, migrate, and `DROP` it on destroy. |
+| **Postgres** | per-env database on the shared server | Connect via `127.0.0.1:5432`. `CREATE DATABASE <base>_<env>` (or `… TEMPLATE <base>` to clone the populated dev DB — far faster than dump/restore, but the source must have no open connections), migrate, and `DROP` it on destroy. |
 | **Redis** (queue/cache) | per-env key namespace | shared server; set a per-env `REDIS_PREFIX` so envs can't read each other's cache/queue. |
 
-SQLite is the easy, fully-isolated case (and the L11+ default). MySQL/Redis are
-shared servers, so isolate the *logical* unit (schema / key prefix), not the
-server.
+SQLite is the easy, fully-isolated case (and the L11+ default). MySQL/Postgres/Redis
+are shared servers, so isolate the *logical* unit (schema / database / key prefix),
+not the server. Postgres mirrors the MySQL branch below — add a `pgsql` arm to the
+create/drop hooks (`psql`, or `createdb`/`dropdb`); reach for `CREATE DATABASE …
+TEMPLATE` when an env needs the populated dev data instead of fresh seeds.
 
 ## The per-project section
 
@@ -151,7 +154,13 @@ project_after_provision() {
 project_pre_destroy() {
   local env="$1" name="$2" slot="$3"
   if [[ "$DB_STRATEGY" == "mysql" ]]; then
-    local db="${DB_BASENAME}_$(db_token "$name")"
+    local tok; tok="$(db_token "$name")"
+    local db="${DB_BASENAME}_${tok}"
+    # Refuse to DROP unless the target is unmistakably this env's DB. A bad $name
+    # could otherwise resolve $db to the shared dev/test DB, and the drop is final.
+    if [[ -z "$tok" || "$db" == "$DB_BASENAME" || "$db" == *_testing ]]; then
+      warn "refusing to drop '$db': not a recognizable per-env database"; return
+    fi
     mysql -u "$DB_ADMIN_USER" -h 127.0.0.1 -P 3306 \
       -e "DROP DATABASE IF EXISTS \`$db\`" 2>/dev/null || warn "could not drop MySQL db $db"
   fi
@@ -208,6 +217,11 @@ project_pre_destroy() {
   is build artifacts, not real work). Best fix: gitignore the build output.
   Confirmed live, bluehorseentries (gitignored, stayed clean) vs hk-lpsignals
   (tracked, went dirty).
+- **Laravel's default `package.json` has no `name` field**, so npm names
+  `package-lock.json` after the worktree directory; committing that from an env and
+  merging it corrupts main's lockfile. Add an explicit `"name"` to `package.json`
+  once. (The general rule and which package managers drift: [`stacks.md`](stacks.md)
+  gotchas.)
 - **Apps that hit the DB during `artisan` boot can't migrate a fresh per-env DB.**
   If a command constructor or a provider's `boot()` runs a query (e.g.
   `Track::where(...)->get()` in a command's `__construct`), `artisan` instantiates
