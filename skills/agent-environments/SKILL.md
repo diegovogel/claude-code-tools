@@ -12,7 +12,8 @@ description: >-
   `scripts/agent-env.sh` or `agent-env serve` failing with "port in use," or
   recovering a worktree whose work looks lost after a Claude restart (tests pass or
   `git diff` empty against the wrong checkout). It adapts to Node, Laravel,
-  WordPress (a theme/plugin inside a full install), Python, and other stacks. Don't
+  WordPress (a theme/plugin inside a full install), Python, Shopify themes (just a
+  git worktree + a dev-server port, no engine needed), and other stacks. Don't
   trigger for a single `git worktree add`, a language
   virtualenv, nvm version pinning, a devcontainer, CI/test parallelism, or
   deploying to a server.
@@ -47,6 +48,12 @@ durable home for the engine and the operating rules.
   Go to [Setting up](#setting-up-in-a-new-project) (first decide whether the repo
   is itself the runnable project or a sub-component of one, see the exception
   callout there).
+- The repo is a **no-local-state stack** (a Shopify theme; more generally, a dev
+  server that only renders local files against a remote service, with no
+  deps/DB/build to isolate) → there's **no engine** to install or operate. The env
+  is just a git worktree + the dev server on a per-env port. Go straight to
+  [`references/shopify.md`](references/shopify.md) for the full create/serve/teardown
+  playbook.
 
 When in doubt, check:
 `test -f scripts/agent-env.sh -o -f scripts/agent-env-wp.sh && echo operating || echo setup`.
@@ -182,6 +189,16 @@ copied verbatim; you fill in a fenced per-project section.
 > [`assets/agent-env-wp.sh`](assets/agent-env-wp.sh) (reusing the engine's slot,
 > guard, and pid primitives). Use the steps below only when the repo is itself the
 > runnable project (Node, Laravel, Python, etc.).
+
+> **Exception: no local state to isolate (a Shopify theme).** If the repo has no
+> dependency dirs, no local DB, and no build to clone or namespace, and its dev
+> server only renders local files against a **remote** service (the canonical
+> case: a Shopify theme served by `shopify theme dev` against a hosted store),
+> the engine isolates nothing real, it would be empty hooks around a `--port`
+> flag. **Don't install it.** The isolation that matters (parallel agents on
+> non-clobbering copies of the code) comes from the git worktree alone, plus a
+> per-env dev-server port. Skip the steps below entirely and follow
+> [`references/shopify.md`](references/shopify.md).
 
 ### 1. Assess the project
 
