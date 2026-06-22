@@ -157,17 +157,25 @@ mistake) — only stop before the PR itself.
    run it whenever anything remotely security-relevant was touched (auth, input
    handling, network calls, file I/O, crypto, headers, middleware, rate limiting).
    Skip only for plainly non-security diffs (pure CSS, a variable rename, docs).
-4. **`/review-with-codex`** — automated review cycles until clean.
-5. **`/manual-qa`** — exercise the change end-to-end. Default: **drive it
+4. **`/manual-qa`** — exercise the change end-to-end. Default: **drive it
    yourself headlessly** — start the env's `serve` and hit it with `curl` for
    HTTP/back-end changes, or write *temporary* Playwright tests for UI (run
    them, do **not** commit them; if no headless browser is installed, suggest
    installing one). Don't use Preview or Claude-in-Chrome — too slow. If the UI
    genuinely can't be driven headlessly because it renders inside a host app
    (Outlook, an IDE, a mobile shell), produce the QA procedure and hand it to
-   the user to drive instead.
-6. **STOP before the PR.** Do not `git commit` / push / `gh pr create` unless
-   the user asks. Report what steps 2–5 found and wait.
+   the user to drive instead. Doing this *before* Codex means it reviews
+   more-correct code, and any trade-offs you weigh here become context you can
+   use to defend your decisions in review.
+5. **`/review-with-codex`** — automated review cycles until clean.
+6. **Re-verify after Codex** — confirm functionality still works after any
+   changes review applied (regressions tests may miss). If step 5 changed
+   nothing, skip this. If it did, re-run step 1 (tests + build) and re-exercise
+   the parts of the `/manual-qa` flow that touch what Codex changed — a full
+   re-run only if the changes were broad. Manual QA is cheap, so when in doubt,
+   re-run more rather than less.
+7. **STOP before the PR.** Do not `git commit` / push / `gh pr create` unless
+   the user asks. Report what steps 2–6 found and wait.
 
 **Projects override these defaults.** A project's CLAUDE.md is authoritative: it
 can pin which steps apply and how — e.g. "`/manual-qa` here must be user-driven
