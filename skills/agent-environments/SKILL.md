@@ -215,7 +215,10 @@ Figure out the eight adaptation knobs (full detail in
 full non-Node fill-in see [`references/laravel.md`](references/laravel.md)):
 
 1. **Dependency dirs** to CoW-clone (`node_modules`, `vendor`, `.venv`, …) and
-   the lockfile-reconcile command.
+   the lockfile-reconcile command — both the fresh-env reconcile
+   (`project_seed_env_files`) and the post-pull reconcile that keeps the main
+   checkout in sync (`project_sync_deps` + `LOCKFILES`, run by an auto-installed
+   git hook; see `references/stacks.md`).
 2. **Local artifacts** to seed (dev certs, fixtures, and **git-ignored
    package-manager credentials** like Composer `auth.json` or npm `.npmrc` tokens
    that private-registry installs need — git-ignored, so `provision` won't copy
@@ -257,7 +260,8 @@ Copy [`assets/agent-env.sh`](assets/agent-env.sh) and
 ### 3. Fill the per-project section
 
 In `scripts/agent-env.sh`, edit **only** the fenced `PER-PROJECT SECTION` (the
-CONFIG block + the seven `project_*` hooks). The shipped values are a worked
+CONFIG block + the eight `project_*` hooks, including `project_sync_deps` +
+`LOCKFILES` for the post-pull dependency-sync hook). The shipped values are a worked
 example for a Vite+Express Node project; keep what fits, rewrite what doesn't,
 using [`references/stacks.md`](references/stacks.md) for each hook and
 [`references/laravel.md`](references/laravel.md) for a full Laravel/PHP fill-in
@@ -293,6 +297,14 @@ Ensure these are gitignored: the config file the managed block writes to (e.g.
 `.agent-env/` and `.agent-env.json` into `.git/info/exclude` itself. **The
 config file must be gitignored**. Otherwise provision's managed-block edit
 shows the worktree as dirty and the destroy guard blocks cleanup.
+
+**Commit `.githooks/` — do NOT gitignore it.** The first `provision` (or, for
+WordPress, `create`) auto-installs the dependency-sync git hooks there and points
+`core.hooksPath` at it (idempotent, quiet). Commit the dir so worktrees and
+collaborators inherit the hook; an untracked `.githooks/` works for your checkout
+but vanishes on `git clean -fdx` and isn't checked out into worktrees. (You can
+also run `scripts/agent-env.sh install-hooks` explicitly.) See
+[`references/stacks.md`](references/stacks.md#keeping-the-main-checkout-in-sync-after-a-pull-project_sync_deps).
 
 ### 7. Smoke-test — and prove the FULL test suite runs in an env
 
@@ -361,6 +373,13 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   ports while preserving everything else; it's regenerated every provision.
 - **Guarded teardown** means the system never silently destroys work: dirty or
   unpushed envs are refused, and unmerged branches outlive their worktrees.
+- **Dependency-sync git hooks** keep the *main checkout* from drifting: when a
+  pull/merge/rebase changes a watched lockfile, a `post-merge`/`post-rewrite` hook
+  runs the per-project `project_sync_deps` (e.g. `npm install`). It's the fix for
+  the recurring trap where an env's PR adds a package, the lockfile merges into
+  main, but nobody installs it there. Auto-installed by `provision`; the hooks
+  just delegate to `agent-env.sh sync-deps` so the install logic lives only in the
+  per-project section.
 
 ## Files in this skill
 

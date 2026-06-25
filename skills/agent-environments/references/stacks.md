@@ -2,7 +2,7 @@
 
 The engine in `assets/agent-env.sh` (everything below the `END PER-PROJECT
 SECTION` line) is stack-agnostic. Adapting to a project means filling in the
-**per-project section**: a CONFIG block and seven `project_*` hooks. This file
+**per-project section**: a CONFIG block and eight `project_*` hooks. This file
 is the detail behind each; read the section you need. For a complete filled-in
 example beyond the Node one shipped in the script, see [`laravel.md`](laravel.md)
 (Laravel/PHP, but the same shape fits any stack).
@@ -20,13 +20,14 @@ example beyond the Node one shipped in the script, see [`laravel.md`](laravel.md
 
 ## The adaptation surface
 
-Everything that varies per project lives in exactly these eight places. This is
+Everything that varies per project lives in exactly these nine places. This is
 the line: the skill provides the machinery; you supply these.
 
 | Knob | Where in the script | How to figure it out |
 |---|---|---|
 | Dependency dirs to clone | `project_seed_env_files` | What does a fresh checkout install that's slow/large? (`node_modules`, `vendor`, `.venv`, `target`) |
 | Lockfile reconcile | `project_seed_env_files` | The "install from lockfile" command (`npm ci`, `composer install`, `uv sync`) |
+| Dependency reconcile on pull | `project_sync_deps` + `LOCKFILES` | The install command to re-run when a pull changes a lockfile, and which lockfiles to watch. Keep it idempotent (see [Dependencies](#dependencies)) |
 | Local artifacts to seed | `project_seed_env_files` | Dev certs, fixtures the app reads but git ignores, and git-ignored package-manager credentials (Composer `auth.json`, npm `.npmrc`) that private-registry installs need |
 | Port count + config keys | `PORTS_PER_ENV`, `project_env_port_lines` | How many ports does the dev stack bind? What config keys name them? |
 | Dev/serve launch | `project_start_servers`, `project_health_urls` | How do you start the app for local dev, and what URL means "up"? |
@@ -56,6 +57,32 @@ The whole speed win is CoW-cloning the dependency tree instead of reinstalling.
 Reconcile against the **env branch's own lockfile**, not main's, a branch that
 changed dependencies must get them. The example does this with a `cmp` of the
 lockfile then a conditional install.
+
+### Keeping the main checkout in sync after a pull (`project_sync_deps`)
+
+`project_seed_env_files` keeps *envs* in sync, but the **main checkout** drifts
+too: an env's PR that adds a package merges `package.json` + the lockfile into
+main, yet nobody runs the install there, so the next build fails on a missing
+module (or, worse, tests pass against stale deps). `install-hooks` fixes this by
+dropping git `post-merge` + `post-rewrite` hooks that, when a pull/merge/rebase
+changes a watched lockfile, run `project_sync_deps`. It's **auto-installed,
+idempotently and quietly, by `provision`** (and by the WP script's `create`), so
+no manual step is required — but you must **commit `.githooks/`** so worktrees
+and collaborators inherit it (it is NOT gitignored; see setup step 6).
+
+Two knobs:
+- `LOCKFILES` — space-separated, repo-root-relative lockfiles to watch. Node:
+  `"package-lock.json"` (or `pnpm-lock.yaml` / `yarn.lock`). Laravel/PHP:
+  `"composer.lock package-lock.json"`. Python: `"poetry.lock"` /
+  `"requirements.txt"` / `"uv.lock"`. Rust: `"Cargo.lock"`.
+- `project_sync_deps` — the reconcile command(s), run with cwd = repo root, and
+  **must be idempotent** (a no-op when already in sync, since it runs on every
+  lockfile-changing pull). Prefer the forgiving installer (`npm install`,
+  `composer install`, `uv sync`, `poetry install`) over the strict
+  lockfile-only one (`npm ci`), which wipes and reinstalls. Multi-tool stacks
+  chain: `composer install --no-interaction && npm install`. This is distinct
+  from the `project_seed_env_files` reconcile, which targets a *fresh env*; this
+  targets *whatever checkout just pulled*.
 
 **Seed git-ignored package-manager credentials, or in-env installs 401.**
 Private-registry auth lives in git-ignored files (Composer `auth.json`, npm

@@ -59,6 +59,11 @@ queue worker." >
   anything dirty or unpushed (commits survive in the main repo's `.git`
   regardless). Merged branches are deleted automatically so the name can be
   recreated; unmerged branches are kept (`create <name> --resume` reattaches one).
+- **Dependencies auto-reconcile after a pull.** A committed git hook (`.githooks/`,
+  installed by the env system) runs `<SYNC_CMD, e.g. npm install>` whenever a
+  merge/pull/rebase changes `<LOCKFILES, e.g. package-lock.json>`, so the checkout
+  can't end up with a manifest listing a package nobody installed. Don't be
+  surprised by an install on `git pull`; don't `rm` `.githooks/`.
 - **Never run `git clean -fdx` at the main checkout root**: envs are nested and
   gitignored, so `-x` would delete them all.
 - **Branch naming is automatic** (`<worktree>-<name>`); don't hand-rename env

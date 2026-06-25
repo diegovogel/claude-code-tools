@@ -19,6 +19,8 @@
 #   agent-env-wp.sh stop <name>
 #   agent-env-wp.sh list
 #   agent-env-wp.sh destroy <name> [--force]   # drop DB, remove clone, delete branch if no unique commits
+#   agent-env-wp.sh install-hooks              # install git hooks that reconcile theme/plugin deps after a pull (auto-run by create)
+#   agent-env-wp.sh sync-deps                  # reconcile deps if a pull changed a lockfile (called by the git hooks)
 #
 # Reuses the generic engine's primitives (slots, unique_commits guard, pid/health
 # machinery, CoW clone). See references/wordpress.md for the model and rationale.
@@ -53,6 +55,21 @@ WP_SERVER_WORKERS=4             # php -S worker count; MUST be >1 or WordPress
 # content still load from the source site via Herd). Override is ALWAYS applied;
 # this only toggles the additional search-replace.
 URL_MODE="search-replace"
+# Lockfiles whose change in a pull triggers project_sync_deps (space-separated,
+# repo-root-relative). WP theme/plugin repos commonly carry both.
+LOCKFILES="composer.lock package-lock.json"
+
+# Reconcile the theme/plugin repo's dependencies after a pull changed a lockfile.
+# Run by the post-merge/post-rewrite git hooks (installed by `install-hooks`) so
+# the repo's main checkout can't end up with a composer.json/package.json that
+# lists a dependency nobody installed (the trap when an env's PR that added a
+# package merges into the repo's main). Runs with cwd = repo root; keep it
+# idempotent. Adjust to your repo's actual managers (drop one line if unused).
+project_sync_deps() {
+  if [[ -f composer.json ]]; then composer install --no-interaction --no-progress; fi
+  if [[ -f package.json ]]; then npm install --no-audit --no-fund; fi
+  return 0
+}
 # ===========================================================================
 
 # ---- primitives borrowed from the generic engine --------------------------
@@ -109,6 +126,72 @@ allocate_slot() { # repo name
 exclude_artifacts() { # repo
   mkdir -p "$1/.git/info"
   grep -qxF ".agent-env/" "$1/.git/info/exclude" 2>/dev/null || echo ".agent-env/" >>"$1/.git/info/exclude"
+}
+
+# ---- dependency-sync git hooks (see agent-env.sh for the rationale) --------
+# After a merge/pull/rebase that changes a lockfile, reconcile the theme/plugin
+# repo's installed dependencies so a branch that added a package (merged from an
+# env's PR) can't leave the repo's main checkout with a manifest listing a
+# dependency nobody installed. The hooks just call back into `sync-deps`, which
+# runs the per-project project_sync_deps — so a new setup only fills
+# project_sync_deps + LOCKFILES in the per-project config above.
+
+write_git_hook() {  # dest-path
+  cat >"$1" <<'HOOK'
+#!/bin/sh
+# Installed by scripts/agent-env-wp.sh (install-hooks). After a merge/pull/rebase
+# that changed a lockfile, reconcile this checkout's dependencies so the manifest
+# can't list a package nobody installed. The install is the per-project
+# project_sync_deps; this delegates so the logic lives in one place.
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -x "$root/scripts/agent-env-wp.sh" ] || exit 0
+exec "$root/scripts/agent-env-wp.sh" sync-deps
+HOOK
+  chmod +x "$1"
+}
+
+# Install post-merge + post-rewrite hooks into the theme/plugin repo (repo-global
+# via the shared git dir) and point core.hooksPath at them. Idempotent. `--quiet`
+# suppresses info output (used by create so it happens without a manual step).
+cmd_install_hooks() {
+  local quiet="" repo hooks_dir cur
+  [[ "${1:-}" == "--quiet" || "${1:-}" == "-q" ]] && quiet=1
+  repo=$(repo_root "$PWD")
+  hooks_dir="$repo/.githooks"
+  mkdir -p "$hooks_dir"
+  write_git_hook "$hooks_dir/post-merge"
+  write_git_hook "$hooks_dir/post-rewrite"
+  cur=$(git -C "$repo" config --local --get core.hooksPath 2>/dev/null || true)
+  case "$cur" in
+    ""|".git/hooks"|"$repo/.git/hooks")
+      git -C "$repo" config core.hooksPath .githooks
+      [[ -n "$quiet" ]] || say "git hooks installed (.githooks); core.hooksPath set"
+      ;;
+    ".githooks") : ;;  # already active
+    *)
+      warn "core.hooksPath is '$cur'; wrote .githooks/{post-merge,post-rewrite} but left it unchanged — set core.hooksPath=.githooks or chain the hooks from your existing hooks dir" ;;
+  esac
+  if [[ -z "$quiet" ]] && ! git -C "$repo" ls-files --error-unmatch .githooks/post-merge >/dev/null 2>&1; then
+    say "commit .githooks/ so worktrees and collaborators inherit the dependency-sync hook"
+  fi
+}
+
+# If a watched lockfile ($LOCKFILES) changed in the merge/pull/rebase that just
+# finished (ORIG_HEAD..HEAD), run project_sync_deps. Called by the git hooks.
+cmd_sync_deps() {
+  local root changed lf
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  cd "$root"
+  git rev-parse --verify --quiet ORIG_HEAD >/dev/null 2>&1 || return 0
+  changed=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null) || return 0
+  for lf in $LOCKFILES; do
+    if grep -qxF -- "$lf" <<<"$changed"; then
+      say "lockfile changed in pull ($lf); reconciling dependencies via project_sync_deps..."
+      project_sync_deps
+      return 0
+    fi
+  done
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -217,6 +300,10 @@ AGENT_ENV_DB=$db
 AGENT_ENV_WEB_PORT=$web_port
 AGENT_ENV_ASSET_PORT=$asset_port
 EOF
+
+  # Ensure the theme/plugin repo has the lockfile-reconcile git hooks (idempotent,
+  # quiet). Best-effort: a hook-install hiccup must never fail create.
+  cmd_install_hooks --quiet || warn "could not install dependency-sync git hooks"
 
   say "created '$name'"
   say "  install: $install"
@@ -348,5 +435,7 @@ case "$cmd" in
   stop)    cmd_stop "$@" ;;
   list)    cmd_list "$@" ;;
   destroy) cmd_destroy "$@" ;;
+  install-hooks) cmd_install_hooks "$@" ;;
+  sync-deps) cmd_sync_deps "$@" ;;
   *) sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

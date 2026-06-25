@@ -18,6 +18,8 @@
 #   agent-env.sh stop <name|path>
 #   agent-env.sh list
 #   agent-env.sh destroy <name|path> [--force]  # deletes the branch only if merged
+#   agent-env.sh install-hooks             # install git hooks that reconcile deps after a pull (setup; auto-run by provision)
+#   agent-env.sh sync-deps                 # reconcile deps if a pull changed a lockfile (called by the git hooks)
 #
 # Inside an env, ALWAYS use `serve`, never the main dev command, which is
 # pinned to the main checkout's ports and would collide.
@@ -73,6 +75,9 @@ PORT_STRIDE=2                         # spacing between a slot's ports; must be 
                                        # (densest, no wasted ports); raise only for headroom.
 PORTS_PER_ENV=2                        # distinct localhost ports each env reserves
 MAIN_DEV_CMD="npm run dev"             # named in messages and the in-env guard
+LOCKFILES="package-lock.json"          # lockfiles whose change in a pull triggers
+                                       # project_sync_deps (space-separated, repo-root-
+                                       # relative; e.g. "composer.lock package-lock.json")
 
 # --- seed an env's files: dependencies (CoW), lockfile reconcile, local certs
 # Deps are the big win: a CoW clone is ~instant and near-zero disk vs. a fresh
@@ -103,6 +108,18 @@ project_seed_env_files() {
   if [[ -d "$main/certs" && ! -d "$env/certs" ]]; then
     clone_dir "$main/certs" "$env/certs" || cp -R "$main/certs" "$env/certs"
   fi
+}
+
+# --- reconcile THIS checkout's dependencies after a pull changed a lockfile.
+# Run by the post-merge/post-rewrite git hooks (installed by `install-hooks`,
+# triggered via `sync-deps`) in whatever checkout pulled — most importantly the
+# main checkout, which otherwise ends up with a package.json/composer.lock that
+# lists a dependency nobody installed (the recurring trap when an env's PR that
+# added a package merges into main). Runs with cwd = repo root. Mirror your
+# stack's install command; keep it idempotent (a no-op when already in sync).
+# Multi-tool stacks chain commands here, e.g. `composer install && npm install`.
+project_sync_deps() {
+  npm install --no-audit --no-fund
 }
 
 # --- emit the config-file managed-block lines for this env. Args:
@@ -345,6 +362,10 @@ cmd_provision() {
 EOF
 
   project_after_provision "$env" "$name" "$slot"
+
+  # Ensure the main checkout has the lockfile-reconcile git hooks (idempotent,
+  # quiet). Best-effort: a hook-install hiccup must never fail provisioning.
+  cmd_install_hooks --quiet || warn "could not install dependency-sync git hooks"
 
   say "provisioned '$name' (slot $slot)"
   say "  path:   $env"
@@ -607,6 +628,78 @@ cmd_run() {
   cd "$env" && exec "$@"
 }
 
+# ---------------------------------------------------------------------------
+# Dependency-sync git hooks. After a merge/pull/rebase that changes a lockfile,
+# reconcile the checkout's installed dependencies, so a branch that added a
+# package (typically merged from an env's PR) can't leave the main checkout with
+# a manifest listing a dependency nobody installed. The hooks are generic across
+# stacks: they just call back into `sync-deps`, which runs the per-project
+# project_sync_deps. So adapting to a new stack means filling project_sync_deps +
+# LOCKFILES in the per-project section, nothing here.
+# ---------------------------------------------------------------------------
+
+# Write a hook script (post-merge / post-rewrite share one body) that delegates
+# to `sync-deps`. Robust to cwd and to a moved checkout via show-toplevel.
+write_git_hook() {  # dest-path
+  cat >"$1" <<'HOOK'
+#!/bin/sh
+# Installed by scripts/agent-env.sh (install-hooks). After a merge/pull/rebase
+# that changed a lockfile, reconcile this checkout's dependencies so the manifest
+# can't list a package nobody installed. The actual install is the per-project
+# section's project_sync_deps; this just delegates so the logic lives in one place.
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -x "$root/scripts/agent-env.sh" ] || exit 0
+exec "$root/scripts/agent-env.sh" sync-deps
+HOOK
+  chmod +x "$1"
+}
+
+# install-hooks: drop the post-merge + post-rewrite hooks into the MAIN checkout
+# and point core.hooksPath at them (both are repo-global: shared across worktrees
+# via the common git dir). Idempotent. `--quiet` suppresses info output (used by
+# provision so setup happens even if the explicit step was skipped).
+cmd_install_hooks() {
+  local quiet="" main hooks_dir cur
+  [[ "${1:-}" == "--quiet" || "${1:-}" == "-q" ]] && quiet=1
+  main=$(main_root)
+  hooks_dir="$main/.githooks"
+  mkdir -p "$hooks_dir"
+  write_git_hook "$hooks_dir/post-merge"
+  write_git_hook "$hooks_dir/post-rewrite"
+  cur=$(git -C "$main" config --local --get core.hooksPath 2>/dev/null || true)
+  case "$cur" in
+    ""|".git/hooks"|"$main/.git/hooks")
+      git -C "$main" config core.hooksPath .githooks
+      [[ -n "$quiet" ]] || say "git hooks installed (.githooks); core.hooksPath set"
+      ;;
+    ".githooks") : ;;  # already active
+    *)
+      warn "core.hooksPath is '$cur'; wrote .githooks/{post-merge,post-rewrite} but left it unchanged — activate by setting core.hooksPath=.githooks or chaining the hooks from your existing hooks dir" ;;
+  esac
+  if [[ -z "$quiet" ]] && ! git -C "$main" ls-files --error-unmatch .githooks/post-merge >/dev/null 2>&1; then
+    say "commit .githooks/ so worktrees and collaborators inherit the dependency-sync hook"
+  fi
+}
+
+# sync-deps: if a watched lockfile ($LOCKFILES) changed in the merge/pull/rebase
+# that just finished (ORIG_HEAD..HEAD), run project_sync_deps. Called by the git
+# hooks; safe to run by hand. No ORIG_HEAD (fresh clone, no prior op) -> no-op.
+cmd_sync_deps() {
+  local root changed lf
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  cd "$root"
+  git rev-parse --verify --quiet ORIG_HEAD >/dev/null 2>&1 || return 0
+  changed=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null) || return 0
+  for lf in $LOCKFILES; do
+    if grep -qxF -- "$lf" <<<"$changed"; then
+      say "lockfile changed in pull ($lf); reconciling dependencies via project_sync_deps..."
+      project_sync_deps
+      return 0
+    fi
+  done
+  return 0
+}
+
 usage() {
   sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
@@ -622,5 +715,7 @@ case "$cmd" in
   stop)      cmd_stop "$@" ;;
   list)      cmd_list "$@" ;;
   destroy)   cmd_destroy "$@" ;;
+  install-hooks) cmd_install_hooks "$@" ;;
+  sync-deps) cmd_sync_deps "$@" ;;
   *)         usage ;;
 esac
