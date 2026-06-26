@@ -38,6 +38,7 @@ PATHS=(
   # Skills
   skills/agent-environments
   skills/working-with-ignition-designer
+  skills/brainstorm-with-panel
 
   # Templates — single file; the rest of ~/.claude/templates is not tracked.
   templates/diegos-engineering-guidelines.md

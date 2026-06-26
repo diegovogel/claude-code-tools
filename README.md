@@ -24,6 +24,7 @@ Some tools require additional dependencies as noted in their details below.
 ### Skills
 * [Ignition Designer](#skill-working-with-ignition-designer): a collection of tips and workflows that improve Claude's ability to build and debug [Ignition Perspective](https://inductiveautomation.com/ignition/modules/perspective) projects.
 * [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments.
+* [brainstorm-with-panel](#skill-brainstorm-with-panel): a phased, multi-agent workflow for generating and evaluating creative solutions to hard problems.
 
 ### Other
 * [Diego's Engineering Guidelines](#document-diegos-engineering-guidelines): a set of engineering rules for Claude to follow, based on nine years of web dev.
@@ -155,6 +156,30 @@ The skill also self-improves: when Claude hits a new gotcha that meets the inclu
 
 **Dependencies:**
 * A copy-on-write-capable filesystem for the speed benefit (APFS on macOS, btrfs or xfs on Linux). It still works without one, just with a slower full copy.
+
+### Skill: `brainstorm-with-panel`
+
+[View source](skills/brainstorm-with-panel)
+
+**Why it exists:** This skill was inspired by an episode of the Hidden Brain podcast about subconscious processing and creativity. There have been cases where a problem is too complex or too novel for the typical workflow. Sometimes simply discussing a problem 1-on-1 with Claude doesn't lead to a solution I'm fully satisfied with. Claude (or any other LLM) isn't actually capable of subconscious thought, of course, but I wondered if there was a way to simulate that kind of unfettered, creative problem-solving for those bigger problems. This skill is the result of that exploration.
+
+**What it does:** when you're stuck on a hard, open-ended problem, it runs a structured brainstorm with a panel of AI agents, in four steps:
+1. **Set up the problem.** Claude writes a short brief (the problem, what you've already tried, what you don't like about the current idea), asking you a couple of clarifying questions if anything is fuzzy. A good brainstorm needs a well-understood problem first.
+2. **Generate ideas.** Several fresh agents go off in parallel to come up with ideas, each told to approach the problem from a different angle (from first principles, by banning the obvious solution, by borrowing from a different field). Some are Claude and one is Codex, so you get two different AI models thinking. At this stage no one is allowed to judge ideas, only produce them.
+3. **Evaluate.** Both Claude and Codex then score every idea and check the most promising ones against your actual code.
+4. **Decide.** Claude hands you a short, honest shortlist with a recommendation, and you make the call. The brief, all the ideas, and the evaluations are saved to files you can revisit or build on in a later round.
+
+**Highlights:**
+* Generating and judging are kept separate. The agents that come up with ideas aren't allowed to evaluate them. A model tends to fall in love with its own ideas, so a different, fresh set of eyes does the judging. That frees the idea phase to be weird and ambitious.
+* Two different AI models, on both sides. Claude and Codex both generate ideas and both evaluate them, so you get two genuinely different "minds" instead of one model agreeing with itself.
+* Each idea-generator attacks from a different angle (first principles, banning the obvious solution, stealing an approach from another field), so you get genuinely different ideas instead of slight variations on the same one.
+* Evaluation is grounded in your real code, not just the description. The reviewers open the actual project to sanity-check the top ideas. The first time I used it, this caught a "great idea, except it depends on something that doesn't exist yet" before any time was spent building it.
+* It tells on itself. Every run ends with a note on whether the exercise actually beat a quick, normal brainstorm, and it will decline to run for an easy problem that doesn't need it rather than putting on a show.
+* Everything is saved. The problem brief, every idea, and the evaluations are written to files, so you can revisit them later or run another round that builds on them.
+
+**Dependencies:**
+* Codex plugin for Claude (optional but recommended). Without it the skill still runs using only Claude, but you lose the cross-model benefit, which is one of the best parts.
+* A ChatGPT account and subscription for Codex, depending on usage.
 
 ### Document: Diego's Engineering Guidelines
 
