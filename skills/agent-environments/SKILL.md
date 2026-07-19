@@ -151,6 +151,19 @@ passes while still isolated in the env, and stop at the PR boundary so the
 human decides when to publish. Don't stop *before* these steps (a common
 mistake) — only stop before the PR itself.
 
+**Mark a transcript chapter for each of steps 2–6.** These five are the
+reviewable spine of the workflow; the chapters are how the user sees at a
+glance which steps ran. At the moment you start a step, call the
+`mark_chapter` tool (exposed as `mcp__ccd_session__mark_chapter` when the
+ccd_session MCP is present) with a consistent title: "Pre-PR: /simplify",
+"Pre-PR: /security-review-plus", "Pre-PR: /manual-qa",
+"Pre-PR: /review-with-codex", "Pre-PR: post-Codex re-check". A skipped step
+still gets its chapter, with " (skipped)" appended to the title and the
+one-line reason as the chapter summary, so all five waypoints appear in the
+table of contents every time, run or not. Other chapters around these are
+fine. If the harness has no chapter tool, don't block on it; the report in
+step 7 still carries the full record.
+
 1. **Verify** — the env's own test + build commands, via `run <name> -- <cmd>`.
 2. **`/simplify`** — quality cleanup of the diff (reuse, dead code, altitude).
 3. **`/security-review-plus`** — *if warranted*. It's cheap, so the bar is low:
@@ -175,12 +188,19 @@ mistake) — only stop before the PR itself.
    re-run only if the changes were broad. Manual QA is cheap, so when in doubt,
    re-run more rather than less.
 7. **STOP before the PR.** Do not `git commit` / push / `gh pr create` unless
-   the user asks. Report what steps 2–6 found and wait.
+   the user asks. The turn's final message must contain a **workflow report**:
+   steps 2–6 listed by name, in order, each with a one-or-two-line summary of
+   what it found and what changed, or "skipped" plus the reason. All five
+   lines appear every time, so a step that didn't run is visibly skipped
+   rather than silently absent. Then wait for the user.
 
 **Projects override these defaults.** A project's CLAUDE.md is authoritative: it
 can pin which steps apply and how — e.g. "`/manual-qa` here must be user-driven
 because the UI only renders in Outlook", or "skip `/review-with-codex`". When the
-project's own section says something different, follow the project, not this default.
+project's own section says something different, follow the project, not this
+default. An override changes what runs, not what's recorded: a step skipped by
+project rule still gets its chapter and its report line, with the project rule
+named as the reason.
 
 ## Setting up in a new project
 
