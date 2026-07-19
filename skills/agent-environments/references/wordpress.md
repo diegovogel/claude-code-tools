@@ -95,9 +95,19 @@ NOT skip plugins (it's serving the real site).
 
 If the worktree has `composer.json` or `package.json`, the script ensures `vendor`
 / `node_modules` are present (CoW-clone from the source repo when available, else
-`composer install` / `npm ci`). It does **not** run a front-end "build": WP repos
-use varied script names (`build`/`bundle`/`compile:css`/...) and usually commit
-built assets. PHP `vendor` matters most: themes/plugins autoload from it at runtime.
+`composer install` / `npm ci`). Composer additionally always reconciles to the
+lockfile after the clone attempt — a bare "dir exists" check is fooled by repos
+that track a partial vendor subset (some starters committed the phpcs toolchain
+pre-gitignore), which materializes an incomplete vendor in a fresh worktree. The
+script does **not** run a front-end "build" by default: WP repos use varied script
+names (`build`/`bundle`/`compile:css`/...) and usually commit built assets. PHP
+`vendor` matters most: themes/plugins autoload from it at runtime.
+
+**If the repo gitignores its compiled assets** (e.g. compiled CSS at the theme
+root), a fresh worktree has none and the env renders unstyled — and any e2e spec
+that loads a compiled file from disk fails. Add a one-shot compile to the create
+flow's per-project section (tab-handbook does `node_modules/.bin/sass scss:.`
+after npm deps).
 
 ## Other notes
 

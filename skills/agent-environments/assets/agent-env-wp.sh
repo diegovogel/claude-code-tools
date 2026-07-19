@@ -274,10 +274,13 @@ cmd_create() {
   # names (build/bundle/compile/...) and usually commit built assets, and `serve`
   # runs the project's own watcher for ongoing changes.
   local rp="$install/$rel"
-  if [[ -f "$rp/composer.json" && ! -d "$rp/vendor" ]]; then
+  if [[ -f "$rp/composer.json" ]]; then
     say "composer deps for $rel"
-    { [[ -d "$repo/vendor" ]] && clone_dir "$repo/vendor" "$rp/vendor"; } \
-      || ( cd "$rp" && composer install --no-interaction --no-progress ) \
+    { [[ -d "$repo/vendor" && ! -d "$rp/vendor" ]] && clone_dir "$repo/vendor" "$rp/vendor"; } || true
+    # Always reconcile to the lockfile (no-op when complete): a bare "dir exists"
+    # check is fooled by a failed/partial clone or a repo that tracks a partial
+    # vendor subset (some starters committed the phpcs toolchain pre-gitignore).
+    ( cd "$rp" && composer install --no-interaction --no-progress ) \
       || warn "composer install failed for $rel (theme/plugin may not load)"
   fi
   if [[ -f "$rp/package.json" && ! -d "$rp/node_modules" ]]; then
