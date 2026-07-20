@@ -109,6 +109,24 @@ that loads a compiled file from disk fails. Add a one-shot compile to the create
 flow's per-project section (tab-handbook does `node_modules/.bin/sass scss:.`
 after npm deps).
 
+## Sibling-repo work in one env (theme + plugin)
+
+A feature that spans both custom repos (e.g. tab-handbook's theme + plugin) can use
+one env: the engine manages the **target** repo's worktree, and you hand-create a
+second worktree for the sibling inside the clone at its normal path
+(`git -C <main-sibling-checkout> worktree add <env>/wp-content/plugins/<plugin> -b <branch>`).
+The env then serves both branches together. Two consequences the engine does NOT
+handle:
+
+- **`destroy` only reclaims its own repo's side.** It deletes the clone directory
+  (taking the sibling worktree's files with it) but knows nothing about the sibling
+  repo's git state, which is left with a dangling "prunable" worktree registration
+  and the feature branch. Finish teardown from the sibling's MAIN checkout:
+  `git worktree prune`, then `git branch -d <branch>`.
+- **Stop anything running FROM the sibling worktree before `destroy`.** In
+  particular a plugin's wp-env (`node_modules/.bin/wp-env stop`): Docker holds
+  mounts of the path `destroy` is about to delete.
+
 ## Other notes
 
 - **Run from the repo**; the script walks up to `wp-config.php` to find the install
