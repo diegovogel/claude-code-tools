@@ -151,6 +151,16 @@ passes while still isolated in the env, and stop at the PR boundary so the
 human decides when to publish. Don't stop *before* these steps (a common
 mistake) — only stop before the PR itself.
 
+**Committing and pushing inside this workflow are pre-authorized. Do not wait
+for a green light.** This overrides the base "commit or push only when the user
+asks" default for the duration of the workflow, and it is a hard requirement,
+not a convenience: step 5's `/review-with-codex` runs `--scope branch --base
+main`, so it can only see *committed* work. Running it on an uncommitted tree
+reviews an empty diff and returns a confident, worthless "no findings." Commit
+as you go, grouped into logical, atomic commits (one coherent change per
+commit, not one dump at the end), and push them. The single action that needs
+the user's express permission is opening the PR.
+
 **Mark a transcript chapter for each of steps 2–6.** These five are the
 reviewable spine of the workflow; the chapters are how the user sees at a
 glance which steps ran. At the moment you start a step, call the
@@ -187,8 +197,10 @@ step 7 still carries the full record.
    the parts of the `/manual-qa` flow that touch what Codex changed — a full
    re-run only if the changes were broad. Manual QA is cheap, so when in doubt,
    re-run more rather than less.
-7. **STOP before the PR.** Do not `git commit` / push / `gh pr create` unless
-   the user asks. The turn's final message must contain a **workflow report**:
+7. **STOP at the PR boundary.** The work should already be committed and pushed
+   by this point (see the pre-authorization above). The one action to hold back
+   is `gh pr create`, which needs the user's express go-ahead.
+   The turn's final message must contain a **workflow report**:
    steps 2–6 listed by name, in order, each with a one-or-two-line summary of
    what it found and what changed, or "skipped" plus the reason. All five
    lines appear every time, so a step that didn't run is visibly skipped

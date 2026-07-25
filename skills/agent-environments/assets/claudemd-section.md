@@ -48,13 +48,15 @@ queue worker." >
   (shorthand for `./scripts/agent-env.sh serve <name> --main-ports`). When done,
   `<npm run stop <name>>` releases the main ports. <Delete if no fixed-address
   integration. >
-- **Pre-PR workflow**: before opening a PR, run the agent-environments skill's
-  pre-PR workflow, then **stop before the PR** — don't commit/push/`gh pr create`
-  unless asked. The skill owns the step list; load it rather than restating the
-  steps here, so the two can't drift. <PROJECT OVERRIDES, if any: e.g.
-  "`/manual-qa` must be user-driven — the UI only renders in `<HOST_APP>`, so
-  generate the procedure and hand it off rather than driving a headless browser."
-  Delete if none. >
+- **Pre-PR workflow**: load the `agent-environments` skill and follow its pre-PR
+  workflow. **The skill is the single source of truth**: which steps run, their
+  order, what gets recorded, the commit/push policy, and where to stop. Restate
+  none of it here, so the two can't drift. Add only what this project genuinely
+  changes. <PROJECT OVERRIDES / ADDITIONS ONLY, if any. Examples: "`/manual-qa`
+  must be user-driven, the UI only renders in `<HOST_APP>`, so generate the
+  procedure and hand it off rather than driving a headless browser." Or an extra
+  gate: "also run `<LINT_CMD>` before stopping." Delete this bracketed part if
+  the project has none. >
 - **Cleanup**: after merge, `<npm run destroy <name>>`. It refuses to remove
   anything dirty or unpushed (commits survive in the main repo's `.git`
   regardless). Merged branches are deleted automatically so the name can be

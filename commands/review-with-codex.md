@@ -4,6 +4,8 @@ Run the current branch through automated Codex review cycles until it's clean or
 
 Verify the working tree is in a shape we can review, then proceed to Phase 2. If any check fails, STOP and report — do NOT proceed to Phase 2.
 
+**Committing is pre-authorized here; don't stall waiting for permission.** This skill reviews the *branch diff* (Phase 2 passes `--scope branch --base main`), so committing isn't a side effect of the review, it's a precondition for the review seeing anything at all. Where the steps below say to commit, just do it. The "otherwise ask" branches below still apply, but they're about *which* changes belong in the commit, not about whether you may commit at all.
+
 1. **On a branch**, not `main`.
    - If on a feature branch, continue to (2).
    - If on `main` AND there are uncommitted changes (tracked or untracked) that look related to the work just done in this conversation: propose a short kebab-case branch name based on the work, confirm it and the intended commit message with the user in a single question, then `git checkout -b <name>` and stage/commit the related files per your system prompt's commit workflow. Proceed once the branch exists with the commit on it.
