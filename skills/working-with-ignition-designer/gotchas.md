@@ -450,6 +450,27 @@ a view-level / root-container `onStartup` event handler. _Discovered: 2026-05-21
 
 ## Named queries
 
+### `system.db.runNamedQuery` signature differs by scope — Script Console omits the project arg
+Gateway/Perspective scope: `runNamedQuery(project, path, params)`. Designer
+Script Console (and Vision client) scope: `runNamedQuery(path, params)` — the
+project is implicit from the open project. Passing the 3-arg form in the
+console fails with the cryptic `TypeError: runNamedQuery(): argument tx:
+expected String instance, got PyDictionary` (the path string slides into the
+`tx` slot). When handing test snippets to a user, match the scope they'll run
+in. _Discovered: 2026-08-05_
+
+### BLOB named-query params (sqlType 20) base64-decode STRING values — pass byte[], never str
+If a named-query parameter of Ignition type BLOB (sqlType 20) receives a
+string, Ignition treats it as base64 and silently DECODES it into the stored
+bytes — invalid base64 chars are skipped, so 'hello blob' stores as the 6
+garbage bytes 85 E9 65 A1 B9 68 with no error (verified empirically on 8.3.7;
+serving it back renders as CJK mojibake like `呴e」h`). Jython 2 makes this
+easy to trip: `'text'.encode('utf-8')` is still a str. Always pass a real
+Java byte[]: `event.file.getBytes()` from a FileUpload, or in test snippets
+`from java.lang import String; String('text').getBytes('UTF-8')`. Never route
+file content through `event.file.getString()` into a BLOB param.
+_Discovered: 2026-08-05_
+
 ### Ignition `sqlType` is NOT `java.sql.Types`
 Named query parameters declare a `sqlType` that uses Ignition's internal enum,
 not the standard JDBC `java.sql.Types`. Observed values:
@@ -594,6 +615,72 @@ Connections → edit the connection → paste the password → Save. The gateway
 re-encrypts with its own key and writes a new ciphertext to `config.json`.
 Other devs cloning the repo will hit the same problem and have to repeat the
 process. _Discovered: 2026-05-21_
+
+**Addendum — the key lives in the gateway DATA volume, and volumes outlive
+repo clones.** Re-cloning the repo does NOT rotate the key: if the Docker
+gateway data volume (e.g. `gw-data_dev`) survives, the fresh clone's committed
+ciphertexts decrypt fine, because the same keystore is still there. Verified
+empirically: a from-scratch clone + `docker compose up` against a months-old
+gw volume produced zero decryption faults and live JDBC sessions. So before
+walking through the manual re-enter flow, check whether an old gw data volume
+exists (`docker volume ls`) — reusing it is the zero-effort fix. Conversely,
+deleting the volume (e.g. a teardown script) is what actually breaks the
+committed passwords. There is no plaintext seeding in 8.3 config.json; the
+only programmatic route is `POST /data/api/v1/encryption/encrypt` with a
+write-scope API key, which itself requires Gateway UI setup first.
+_Discovered: 2026-08-03_
+
+### `GATEWAY_ADMIN_PASSWORD` is ignored on a reused data volume — reset via `gwcmd.sh -p`
+The Docker image's `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD` env vars
+only apply during first-launch commissioning of an empty data volume. If the
+gateway data volume is reused (the normal case for a dev stack whose volumes
+outlive repo clones), the admin login is whatever that gateway last had — the
+env file is a red herring. Symptom: "Login failed" with the env-file password
+on Designer/Perspective/Gateway UI.
+
+**Fix:** `docker exec <gw> ./gwcmd.sh -p` (prints "Password has been reset"),
+restart the gateway service, then open the gateway URL: it serves a one-step
+commissioning page (`Resources needing commissioning: authSetup`) where the
+user sets the new admin credentials. Set them to match the env file so the
+repo stays truthful. The entrypoint does NOT auto-seed this re-commissioning
+from env vars (that's first-launch only). The reset only re-provisions the
+internal IdP admin user; the keystore and embedded JDBC secrets are untouched.
+_Discovered: 2026-08-03_
+
+**Follow-up — the reset leaves a split-brain IdP config that silently breaks
+Perspective login.** `gwcmd -p` rewrites security-properties to point the
+gateway's system auth at its new `temp` IdP/user-source, but Perspective
+projects still resolve to the ORIGINAL IdP. Gateway UI + Designer then work
+while Perspective sessions loop: "You must log in to continue" → IdP login
+succeeds (or auto-passes via cookie) → bounced straight back to the same
+prompt, no error anywhere (WARN-level logs stay quiet; the ws "errored out"
+warnings are just the auth redirect killing the socket, not the cause).
+Ignition keeps ONE web-auth session per browser tagged by IdP, so a session
+bound to `temp` can never satisfy a project wanting the original IdP. The
+durable fix: add your user to the user source behind the ORIGINAL IdP (for an
+internal-type IdP just copy the user entry between `user-source/*/users.json`
+files — the `[salt]hash` passwords are portable), then point
+security-properties back at the original IdP (`systemIdentityProvider`,
+`systemAuthProfile`, `designerAuthStrategy: IDENTITY_PROVIDER`) and restart.
+One IdP for everything = no mismatch possible. Also: an IdP named after a
+cloud provider (e.g. "AzureAD") in a dev config collection may be
+`"type": "internal"` — check `config.json` before assuming users must be
+added in the cloud tenant. _Discovered: 2026-08-05_
+
+### "Unable to map the IdP attribute source to a user" — id mapped from a claim the user doesn't have
+An internal-type IdP presents users as OIDC-ish claims (`sub`,
+`preferred_username`, `given_name`, `family_name`, `email` from the email
+contactInfo, `roles`). If the IdP's `userAttributeMapper` maps the required
+`id` from `email` (common in configs cloned from a real cloud IdP), any user
+WITHOUT an email contactInfo authenticates successfully but then fails
+user-mapping: gateway log shows `gateway.IdentityProvider — Unable to map the
+IdP attribute source to a user` (ERROR), and the symptom is a silent
+Perspective login loop or a Designer-SSO callback "Internal Server Error" —
+while other users (with emails) log in fine, which makes it look
+account-specific. Fix: map `id` from `sub` (what Ignition's stock internal
+IdP uses) in the IdP's `config.json`, or give the user an email contactInfo.
+When hunting these, grep system_logs for logger `IdentityProvider` — filters
+like `%idp%`/`%uth%` miss that logger name entirely. _Discovered: 2026-08-05_
 
 ### Gateway scan endpoint
 For the propagation workflow (see Workflow rules → "Two cache layers"), the
