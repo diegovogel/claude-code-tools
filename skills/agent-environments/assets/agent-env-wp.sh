@@ -80,7 +80,16 @@ clone_dir() {
     *)      cp -R --reflink=auto "$src" "$dst" 2>/dev/null ;;
   esac
 }
-pid_alive() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
+# True only if the pidfile names a LIVE process that is still this env's server.
+# A bare kill -0 is not enough: once the server exits, the OS can recycle its PID
+# onto an unrelated process, which would make `serve` report success without
+# serving and `stop`/`destroy` signal a stranger. The command line carries
+# --port=<port>, so that is the identity check. Port omitted -> liveness only.
+server_alive() { # pidfile [port]
+  local pid; pid=$(cat "$1" 2>/dev/null || true)
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+  [[ -z "${2:-}" ]] || ps -o command= -p "$pid" 2>/dev/null | grep -q -- "--port=$2"
+}
 port_busy() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t >/dev/null 2>&1; }
 wait_for_url() { # url label timeout
   local url="$1" label="$2" deadline=$((SECONDS + $3))
@@ -91,7 +100,12 @@ wait_for_url() { # url label timeout
   say "$label is up: $url"
 }
 # Commits reachable ONLY from $branch (safe-to-delete check; remote-agnostic).
-unique_commits() { git -C "$1" rev-list --count "refs/heads/$2" --not --exclude="$2" --branches --remotes 2>/dev/null || echo "?"; }
+# A branch that does not exist has nothing to lose, so it reports 0 — that is what
+# lets `destroy` reclaim an env whose `create` died before `git worktree add`.
+unique_commits() {
+  git -C "$1" show-ref --verify --quiet "refs/heads/$2" || { echo 0; return; }
+  git -C "$1" rev-list --count "refs/heads/$2" --not --exclude="$2" --branches --remotes 2>/dev/null || echo "?"
+}
 canonical_branch() { printf '%s%s\n' "$CANONICAL_BRANCH_PREFIX" "$1"; }
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_'; }
 
@@ -154,7 +168,7 @@ HOOK
 # via the shared git dir) and point core.hooksPath at them. Idempotent. `--quiet`
 # suppresses info output (used by create so it happens without a manual step).
 cmd_install_hooks() {
-  local quiet="" repo hooks_dir cur
+  local quiet="" repo hooks_dir cur eff existing
   [[ "${1:-}" == "--quiet" || "${1:-}" == "-q" ]] && quiet=1
   repo=$(repo_root "$PWD")
   hooks_dir="$repo/.githooks"
@@ -162,10 +176,28 @@ cmd_install_hooks() {
   write_git_hook "$hooks_dir/post-merge"
   write_git_hook "$hooks_dir/post-rewrite"
   cur=$(git -C "$repo" config --local --get core.hooksPath 2>/dev/null || true)
+  # An unset LOCAL hooksPath does not mean none is in effect: a global or system
+  # core.hooksPath still applies, and writing a local one would override it.
+  eff=$(git -C "$repo" config --get core.hooksPath 2>/dev/null || true)
+  if [[ -z "$cur" && -n "$eff" && "$eff" != ".githooks" ]]; then
+    warn "core.hooksPath is '$eff' (configured outside this repo); wrote .githooks/{post-merge,post-rewrite} but left it unchanged — set it locally to .githooks, or chain these hooks from '$eff'"
+    return 0
+  fi
+  # An unset core.hooksPath does NOT mean "no hooks": git falls back to
+  # .git/hooks, so repos using pre-commit/husky-style hooks there are live.
+  # Pointing core.hooksPath at .githooks would silently disable every one of
+  # them, so treat real hooks in .git/hooks the same as a foreign hooksPath.
+  # Symlinks count: hook managers commonly link them in, and git runs anything
+  # executable there, so -type f alone would miss them and switch anyway.
+  existing=$(find "$repo/.git/hooks" -maxdepth 1 ! -name '*.sample' \( -type f -o -type l \) -perm -u+x 2>/dev/null | head -3 || true)
   case "$cur" in
     ""|".git/hooks"|"$repo/.git/hooks")
-      git -C "$repo" config core.hooksPath .githooks
-      [[ -n "$quiet" ]] || say "git hooks installed (.githooks); core.hooksPath set"
+      if [[ -n "$existing" ]]; then
+        warn "left core.hooksPath unset: $repo/.git/hooks already holds active hooks ($(echo "$existing" | xargs -n1 basename | tr '\n' ' ')) that switching to .githooks would disable — move them into .githooks/ (or chain them from there), then rerun install-hooks"
+      else
+        git -C "$repo" config core.hooksPath .githooks
+        [[ -n "$quiet" ]] || say "git hooks installed (.githooks); core.hooksPath set"
+      fi
       ;;
     ".githooks") : ;;  # already active
     *)
@@ -194,6 +226,23 @@ cmd_sync_deps() {
   return 0
 }
 
+# Per-name lifecycle mutex. create and destroy both mutate the same install,
+# slot, claim, branch and database, so they must exclude EACH OTHER, not merely
+# notice each other: observing the lock still lets destroy delete paths a
+# concurrently-starting create is filling in. Both acquire it for their whole
+# run and release here from the EXIT trap, on every path (success, die,
+# interrupt). Guarded because the trap can fire before any lock was taken.
+AGENT_ENV_LOCK=""
+env_lock_path() { echo "$1/.agent-env/.lock-$(sanitize "$2")"; }
+take_env_lock() { # repo name verb
+  AGENT_ENV_LOCK=$(env_lock_path "$1" "$2")
+  mkdir -p "$1/.agent-env"
+  mkdir "$AGENT_ENV_LOCK" 2>/dev/null \
+    || { AGENT_ENV_LOCK=""; die "another lifecycle operation for '$2' is already running, so $3 would race it (if that process died, remove $(env_lock_path "$1" "$2"))"; }
+  trap release_env_lock EXIT
+}
+release_env_lock() { [[ -n "${AGENT_ENV_LOCK:-}" ]] && rm -rf "$AGENT_ENV_LOCK"; return 0; }
+
 # ---------------------------------------------------------------------------
 cmd_create() {
   local name="${1:-}" base="${2:-}"
@@ -207,7 +256,19 @@ cmd_create() {
   [[ "$rel" != "$repo" ]] || die "repo $repo is not inside the WP install $wproot"
   [[ -z "$base" ]] && base=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
   branch=$(canonical_branch "$name")
+  # The name pattern above still admits refs git rejects ('a..b', 'a.', 'a.lock').
+  # Catch that here rather than at `git worktree add`, which runs after the claim,
+  # slot, metadata and a full clone — a failure there costs a manual destroy.
+  git check-ref-format "refs/heads/$branch" 2>/dev/null \
+    || die "name '$name' makes an invalid git branch ($branch); avoid '..', a trailing '.', and the '.lock' suffix"
   install="$ENV_PARENT/${site}__${name}"
+
+  # Serialize creates of the SAME name. The install-path check below is a
+  # read-then-write test: two concurrent `create foo` calls both pass it and then
+  # share one slot, install path, branch and database, clobbering each other.
+  # mkdir is the atomic gate; the trap releases it on success, failure or die.
+  take_env_lock "$repo" "$name" "creating it"
+
   [[ ! -e "$install" ]] || die "$install already exists (destroy it first)"
 
   # Reuse a leftover branch only if it carries no unique work.
@@ -217,11 +278,64 @@ cmd_create() {
       || die "branch $branch exists with $u unique commit(s); delete it or pick another name"
   fi
 
+  db="wp_$(sanitize "${site}_${name}")"
+  # sanitize() maps every non-alphanumeric to '_', so two names that differ only
+  # in separator ('a-b' vs 'a_b') resolve to ONE database — and the DROP later
+  # would silently destroy the other env's data while it is still running.
+  #
+  # The claim is a mkdir, which is atomic across processes: a read-then-write
+  # check would let two concurrent creates both pass before either recorded
+  # anything, and running creates in parallel is the whole point of this tool.
+  # Claimed before allocate_slot so a refusal leaves no slot behind.
+  #
+  # An existing claim is ALWAYS occupied, even when its owner file is unreadable:
+  # the owner is written just after the winning mkdir, so a rival that treated
+  # "no owner yet" as stale would sail straight through the window the claim
+  # exists to close. Only the claim's own env may proceed, which is what lets a
+  # failed create be retried under the same name.
+  local claim="$repo/.agent-env/db-claims/$db" owner="" claim_fresh=1
+  mkdir -p "$repo/.agent-env/db-claims"
+  if ! mkdir "$claim" 2>/dev/null; then
+    claim_fresh=0
+    owner=$(cat "$claim/owner" 2>/dev/null || true)
+    [[ "$owner" == "$name" ]] \
+      || die "database $db is already claimed by env '${owner:-<unknown>}' (names differing only in separator collide); pick another name, or if that env is gone remove $claim"
+  fi
+  printf '%s\n' "$name" >"$claim/owner"
+
+  # A brand-new claim must not land on an existing database: that DB belongs to
+  # something else (made by hand, or an env whose local state was wiped), and the
+  # DROP later would take its data with it. A pre-existing claim we own is
+  # different — that is a retry of our own create, so dropping is correct.
+  # Checked here, before the slot and the clone, so a refusal costs nothing.
+  if (( claim_fresh )) && mysql -u root -h 127.0.0.1 -N -B -e "SHOW DATABASES LIKE '$db'" 2>/dev/null | grep -qx "$db"; then
+    rm -rf "$claim"
+    die "database $db already exists but no env claims it; drop it yourself or pick another name"
+  fi
+
   slot=$(allocate_slot "$repo" "$name")
   (( PORT_STRIDE >= PORTS_PER_ENV )) || die "PORT_STRIDE ($PORT_STRIDE) must be >= PORTS_PER_ENV ($PORTS_PER_ENV); adjacent slots would overlap"
   web_port=$((PORT_BASE + PORT_STRIDE * slot))
   asset_port=$((web_port + 1))
   exclude_artifacts "$repo"
+
+  # Record env state BEFORE the first mutation. Everything here is already known,
+  # and writing it up front is what makes a partial env recoverable: if create
+  # dies after the clone or the DB import, `destroy` can still load and reclaim
+  # it. Written late, that failure leaves a slot, an install dir, a branch and
+  # possibly a database that `destroy` cannot see and `create` refuses to reuse.
+  local ed; ed=$(env_dir "$name"); mkdir -p "$ed"
+  cat >"$ed/meta.env" <<EOF
+AGENT_ENV_NAME=$name
+AGENT_ENV_SLOT=$slot
+AGENT_ENV_SITE=$site
+AGENT_ENV_REL=$rel
+AGENT_ENV_INSTALL=$install
+AGENT_ENV_BRANCH=$branch
+AGENT_ENV_DB=$db
+AGENT_ENV_WEB_PORT=$web_port
+AGENT_ENV_ASSET_PORT=$asset_port
+EOF
 
   say "cloning WP install (CoW): $wproot -> $install"
   mkdir -p "$ENV_PARENT"
@@ -233,7 +347,7 @@ cmd_create() {
   say "worktree: $install/$rel  (branch $branch from $base)"
 
   # Per-env database: copy the site's DB, point the env's wp-config at it.
-  db="wp_$(sanitize "${site}_${name}")"
+  # ($db was resolved and collision-checked before the clone.)
   say "creating per-env database $db"
   # --skip-themes --skip-plugins on DB-level wp calls: WP-CLI bootstraps WordPress
   # (loading the site's plugins/theme) for these, and a plugin that misbehaves in
@@ -283,30 +397,36 @@ cmd_create() {
     ( cd "$rp" && composer install --no-interaction --no-progress ) \
       || warn "composer install failed for $rel (theme/plugin may not load)"
   fi
-  if [[ -f "$rp/package.json" && ! -d "$rp/node_modules" ]]; then
-    say "npm deps for $rel"
-    { [[ -d "$repo/node_modules" ]] && clone_dir "$repo/node_modules" "$rp/node_modules"; } \
-      || ( cd "$rp" && npm ci --no-audit --no-fund ) \
-      || warn "npm install failed for $rel (asset watcher may not run)"
+  if [[ -f "$rp/package.json" ]]; then
+    if [[ ! -d "$rp/node_modules" ]]; then
+      say "npm deps for $rel"
+      { [[ -d "$repo/node_modules" ]] && clone_dir "$repo/node_modules" "$rp/node_modules"; } \
+        || ( cd "$rp" && npm ci --no-audit --no-fund ) \
+        || warn "npm install failed for $rel (asset watcher may not run)"
+    fi
+    # A cloned node_modules mirrors the SOURCE checkout, which may sit on a
+    # different lockfile than base-ref — the env would then run on packages that
+    # do not match its own code. Reconcile only when the lockfiles actually
+    # differ, so the common case keeps the instant CoW path (this is the npm
+    # half of the reconcile the composer branch above always does).
+    if [[ -f "$rp/package-lock.json" ]] && ! cmp -s "$repo/package-lock.json" "$rp/package-lock.json"; then
+      say "lockfile differs from the source checkout; reconciling npm deps for $rel"
+      ( cd "$rp" && npm ci --no-audit --no-fund ) \
+        || warn "npm ci failed for $rel (dependencies may not match $base)"
+    fi
   fi
-
-  # Record env state for serve/stop/list/destroy.
-  local ed; ed=$(env_dir "$name"); mkdir -p "$ed"
-  cat >"$ed/meta.env" <<EOF
-AGENT_ENV_NAME=$name
-AGENT_ENV_SLOT=$slot
-AGENT_ENV_SITE=$site
-AGENT_ENV_REL=$rel
-AGENT_ENV_INSTALL=$install
-AGENT_ENV_BRANCH=$branch
-AGENT_ENV_DB=$db
-AGENT_ENV_WEB_PORT=$web_port
-AGENT_ENV_ASSET_PORT=$asset_port
-EOF
 
   # Ensure the theme/plugin repo has the lockfile-reconcile git hooks (idempotent,
   # quiet). Best-effort: a hook-install hiccup must never fail create.
   cmd_install_hooks --quiet || warn "could not install dependency-sync git hooks"
+
+  # Completion marker, written last. meta.env is deliberately written BEFORE the
+  # clone so `destroy` can reclaim a half-built env — but that also makes a
+  # half-built env loadable, and its wp-config still names the SOURCE database
+  # until `wp config set DB_NAME` runs. Serving one would point WordPress (cron,
+  # plugins, writes) at the real site's data. `serve` and `run` refuse without
+  # this line; `destroy` and `list` deliberately do not require it.
+  echo "AGENT_ENV_READY=1" >>"$ed/meta.env"
 
   say "created '$name'"
   say "  install: $install"
@@ -322,6 +442,15 @@ load_env() { # name -> sources meta.env
   source "$ed/meta.env"
 }
 
+# load_env for the commands that RUN the env. A half-built env (create died
+# partway) still has meta.env by design, but its wp-config may still point at
+# the source database — using it would break the isolation the env exists for.
+load_ready_env() { # name
+  load_env "$1"
+  [[ "${AGENT_ENV_READY:-}" == "1" ]] \
+    || die "env '$1' is incomplete (create did not finish; it may still point at the source database) — 'destroy $1' and create it again"
+}
+
 # run — execute a command IN the env's code worktree, independent of the shell's
 # cwd. The cwd-drift fix (see agent-env.sh): after a restart/resume the agent's
 # Bash cwd can reset to the source checkout, so a bare `npm test` / `composer test`
@@ -333,15 +462,21 @@ cmd_run() {
   shift
   [[ "${1:-}" == "--" ]] && shift   # optional separator
   [[ $# -gt 0 ]] || die "run: no command given (agent-env-wp.sh run <name> -- <command...>)"
-  load_env "$name"
+  load_ready_env "$name"
   cd "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" && exec "$@"
 }
 
 cmd_serve() {
   local name="${1:-}"; [[ -n "$name" ]] || die "usage: serve <name>"
-  load_env "$name"
+  load_ready_env "$name"
+  # Startup is check-then-spawn-then-write-pid: two concurrent serves would both
+  # pass the checks, both spawn, and the loser's dead PID could land in web.pid
+  # last, orphaning the live server beyond stop's reach. Serving also must not
+  # begin while destroy is tearing the env down. Same per-name mutex, held for
+  # the startup sequence only — the server itself outlives this command.
+  take_env_lock "$(repo_root "$PWD")" "$name" "serving it"
   local ed; ed=$(env_dir "$name")
-  if pid_alive "$ed/web.pid"; then say "'$name' already serving"; return 0; fi
+  if server_alive "$ed/web.pid" "$AGENT_ENV_WEB_PORT"; then say "'$name' already serving"; return 0; fi
   port_busy "$AGENT_ENV_WEB_PORT" && die "port $AGENT_ENV_WEB_PORT in use (agent-env-wp.sh stop $name, or a stale process)"
   say "starting '$name' on http://127.0.0.1:$AGENT_ENV_WEB_PORT"
   mkdir -p "$AGENT_ENV_INSTALL/logs"
@@ -372,10 +507,20 @@ cmd_serve() {
 
 cmd_stop() {
   local name="${1:-}"; [[ -n "$name" ]] || die "usage: stop <name>"
-  local ed; ed=$(env_dir "$name"); local pidfile pid
+  local ed port; ed=$(env_dir "$name"); local pidfile pid
+  # Read the port directly rather than via load_env, which dies on a missing
+  # meta.env — stop must stay usable from destroy's cleanup path.
+  port=$(sed -n 's/^AGENT_ENV_WEB_PORT=//p' "$ed/meta.env" 2>/dev/null || true)
   for pidfile in "$ed"/*.pid; do
     [[ -e "$pidfile" ]] || continue
-    pid=$(cat "$pidfile"); kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    # If the server already exited, the OS may have recycled its PID onto an
+    # unrelated process — and the group kill fails over to a direct kill, which
+    # would take that process down. Only signal a PID whose command line still
+    # carries this env's port; otherwise just drop the stale pidfile.
+    if server_alive "$pidfile" "$port"; then
+      kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    fi
     rm -f "$pidfile"
   done
   say "stopped $name"
@@ -392,7 +537,7 @@ cmd_list() {
     ( # subshell so sourced vars don't leak
       # shellcheck disable=SC1091
       source "$ed/meta.env"
-      serving=no; pid_alive "$ed/web.pid" && serving=yes
+      serving=no; server_alive "$ed/web.pid" "$AGENT_ENV_WEB_PORT" && serving=yes
       printf '%-20s %-26s %-9s %-22s %s\n' "$AGENT_ENV_NAME" "$AGENT_ENV_BRANCH" "$AGENT_ENV_WEB_PORT" "$AGENT_ENV_DB" "$serving"
     )
   done
@@ -404,11 +549,22 @@ cmd_destroy() {
   for arg in "$@"; do [[ "$arg" == "--force" ]] && force=1 || die "unknown flag: $arg"; done
   load_env "$name"
   local repo ed uniq; repo=$(repo_root "$PWD"); ed=$(env_dir "$name")
+  # meta.env exists from the start of create, so destroy can reach a live
+  # creation. Take the lifecycle mutex for the whole teardown.
+  take_env_lock "$repo" "$name" "destroying it"
   uniq=$(unique_commits "$repo" "$AGENT_ENV_BRANCH")
   cmd_stop "$name" >/dev/null 2>&1 || true
   if (( ! force )); then
-    if [[ -n "$(git -C "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" status --porcelain 2>/dev/null)" ]]; then
-      die "'$name' worktree has uncommitted changes; commit/push, or rerun with --force"
+    # Only inspect a worktree that is actually there: a create that died before
+    # `git worktree add` leaves none, and that is precisely the state destroy
+    # exists to reclaim. But if the directory DOES exist and git cannot read it,
+    # treat that as unsafe rather than clean — suppressing the error would let
+    # rm -rf delete modified files.
+    if [[ -d "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" ]]; then
+      local dirty strc=0
+      dirty=$(git -C "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" status --porcelain 2>/dev/null) || strc=$?
+      (( strc == 0 )) || die "'$name': cannot read the worktree's git status at $AGENT_ENV_INSTALL/$AGENT_ENV_REL (missing or corrupt metadata); inspect it, or rerun with --force to delete it anyway"
+      [[ -z "$dirty" ]] || die "'$name' worktree has uncommitted changes; commit/push, or rerun with --force"
     fi
     [[ "$uniq" == "0" ]] || die "'$name' has $uniq commit(s) only on $AGENT_ENV_BRANCH; push/merge them, or --force"
   fi
@@ -427,6 +583,8 @@ cmd_destroy() {
   # Free the slot so its ports return to the pool; the next new env reuses the
   # lowest free number (no persistence: recreating this name may get new ports).
   rm -f "$repo/.agent-env/wp-slots/$name"
+  # Release the database-name claim so the name can be created again.
+  rm -rf "${AGENT_ENV_DB:+$repo/.agent-env/db-claims/$AGENT_ENV_DB}"
   say "destroyed '$name' (slot ${AGENT_ENV_SLOT:-?} freed)"
 }
 

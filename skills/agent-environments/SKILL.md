@@ -421,7 +421,10 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
 - [`assets/worktree-edit-guard.cjs`](assets/worktree-edit-guard.cjs): a `PreToolUse`
   hook (wired in `~/.claude/settings.json`) that blocks Edit/Write/MultiEdit to
   the main checkout while the session is in an agent-env worktree — the backstop
-  for the "re-root file-tool paths" cardinal rule. Fails open.
+  for the "re-root file-tool paths" cardinal rule. It identifies the worktree
+  from git's own on-disk layout rather than a path pattern, so it covers every
+  worktree location: `.claude/worktrees/`, the WordPress flow's envs outside the
+  repo, and any custom `ENV_PARENT`. Fails open.
 - [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh): an optional
   `SessionStart` hook that reminds a resumed session to verify via `agent-env.sh run
   <name> -- <cmd>` when provisioned envs exist — the proactive companion to the
