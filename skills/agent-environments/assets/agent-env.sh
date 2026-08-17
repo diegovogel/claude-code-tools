@@ -342,6 +342,10 @@ cmd_provision() {
     project_env_port_lines "$name" "$slot" "${ports[@]}"
     echo "$MARKER_END"
   } >"$env/.env.tmp"
+  # Restrict before the rename, not after: this file lands fresh on every
+  # provision, so it would otherwise take the umask default and hand every user
+  # on the machine the app key and database credentials.
+  chmod 600 "$env/.env.tmp"
   mv "$env/.env.tmp" "$env/.env"
 
   # Shell-sourceable port facts for serve/stop/list.
