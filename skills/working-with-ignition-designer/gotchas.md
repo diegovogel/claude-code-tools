@@ -146,6 +146,24 @@ workflow, *Revert Changes* is the smoothest — single right-click, then
 Cmd+Shift+U, no dialog. Use the dialog only if Designer has REAL unsaved
 edits you don't want to throw away. _Discovered: 2026-05-21_
 
+### Designer Preview does NOT render popups — test popup flows in a real session
+`system.perspective.openPopup` (and anything built on it, including alert /
+confirmation helpers) silently does nothing in Designer's Preview mode: the
+Designer's browser emulation does not support popup windows. The script runs,
+the gateway accepts the call, and **no error is logged anywhere** — the popup
+just never appears, which reads exactly like "my button does nothing."
+
+Symptom triage: if a button's handler looks correct, the gateway log shows no
+WARN from `perspective.actions.script`, and the screen does not even dim for a
+`modal=True` popup, suspect Preview before suspecting the script. Confirm by
+adding one `system.util.getLogger(...).info(...)` line at the top of the
+handler — if it logs, the handler ran and Preview is eating the popup.
+
+Corollary: error-feedback paths built on popups (a `failAlert`-style helper)
+are invisible during Preview testing, so a failure that *should* alert the
+user looks like a silent success. Exercise those paths in a real browser
+session before believing them. _Discovered: 2026-08-14_
+
 ### Hard-refresh the Perspective session after any Designer change
 Browser-side Perspective sessions cache the view bundle. After any view edit
 (even after Designer is saved), tell the user to hard-refresh the session
@@ -206,6 +224,34 @@ no `onCellClick`. For column-specific click handling (e.g. open a different
 popup when clicking the Image column vs the Molds column), use `render: "view"`
 on the column and put an embedded sub-view in each cell that fires its own
 `onClick` or `onActionPerformed`. _Discovered: 2026-05-21_
+
+### Flex Repeater instances stretch to fill — set `useDefaultViewHeight` + the child view's defaultSize
+By default a Flex Repeater stretches each repeated instance to fill the
+container, so a 3-item list gives you three giant rows and a scrollbar
+instead of three compact ones. The fix is a pair, and both halves are
+required:
+
+1. On the **child view**, set its **defaultSize** height to the row height.
+2. On the **repeater**, set **`useDefaultViewHeight = true`** so it honors
+   that instead of stretching.
+
+**The width half is the nastier one.** `useDefaultViewWidth` also defaults to
+true, so every instance renders at the child view's `defaultSize.width` no
+matter how wide the repeater is. Symptom: the first child of the row shows and
+everything after it is invisible — trailing labels/buttons get squeezed into
+whatever the leftover pixels allow. It reads like "my button didn't get added"
+rather than a layout problem. Set `useDefaultViewWidth = false` so instances
+stretch, and strip the `basis` values Designer auto-adds to each child (they
+compound the squeeze — see the "Default to NO basis/grow" entry below).
+
+Alternative (and the only per-instance option): each entry in `props.instances`
+may carry the reserved keys **`instancePosition`** and **`instanceStyle`**,
+which the repeater applies to that instance's flex position/style rather than
+passing to the view as params — e.g.
+`{'instancePosition': {'basis': '44px', 'shrink': 0}, ...}`. Useful for
+variable row heights, but it pushes layout into whatever builds the instances
+array (often a binding transform), so prefer the defaultSize route.
+_Discovered: 2026-08-13_
 
 ### Default to NO `position.basis` / `position.grow` / `position.shrink`
 Don't reflexively add explicit sizing to every new flex child. Perspective
@@ -475,11 +521,18 @@ _Discovered: 2026-08-05_
 Named query parameters declare a `sqlType` that uses Ignition's internal enum,
 not the standard JDBC `java.sql.Types`. Observed values:
 
-| Ignition `sqlType` | Meaning           |
-|--------------------|-------------------|
-| `2`                | Integer (IDs)     |
-| `7`                | String / TEXT     |
-| `20`               | BLOB / binary     |
+| Ignition `sqlType` | Meaning           | Designer "Data Type" label |
+|--------------------|-------------------|----------------------------|
+| `2`                | Integer (IDs)     | Integer                    |
+| `7`                | String / TEXT     | String                     |
+| `20`               | BLOB / binary     | **ByteArray** (verified 8.3.7) |
+
+Note the last one: there is no "BLOB" or "Binary" entry in the Designer's
+Data Type dropdown, so a param that must carry `bytea`/`varbinary` bytes is
+easy to think unsupported. Pick **ByteArray**. When in doubt about any
+sqlType, open an existing named query that already uses it and copy the
+label — the JSON stores the enum number, the dropdown shows a different
+name.
 
 Don't blindly map `12` (JDBC VARCHAR) or `4` (JDBC INTEGER) — they won't
 behave the same. Look at an existing named query in the same project for the
@@ -767,6 +820,67 @@ sqlite3 /path/to/system_logs.idb \
 _Discovered: 2026-05-21_
 
 ---
+
+## Perspective File Upload
+
+### 8.3 caps uploads at ~19.9 MB in web.xml, `fileSizeLimit` is ignored, and the failure is SILENT
+Ignition 8.3 added a hard servlet-level cap on the File Upload component:
+files must be smaller than **20,848,820 bytes (19.88 MB)** regardless of the
+component's `fileSizeLimit` prop. It lives in the `DataRoutes` servlet's
+multipart config:
+
+```
+<Ignition>/webserver/webapps/main/WEB-INF/web.xml
+  <servlet-name>DataRoutes</servlet-name>
+  <multipart-config><max-file-size>20848820</max-file-size> ...
+```
+
+The failure mode is nasty, because three things hide it:
+
+1. `POST /data/perspective/upload-file/...` returns **500** and the component
+   still reports **"Upload successful"** to the user — a silent data-loss bug.
+2. **Nothing is logged anywhere** — not `system_logs.idb`, not stdout, even
+   with every Perspective logger at DEBUG. Jetty rejects the multipart body
+   before Ignition's servlet code runs, so `onFileReceived` never fires and
+   your own try/except never sees it.
+3. Because the script never runs, gateway-side error handling cannot report
+   it. Any "upload failed" feedback has to come from the component's own
+   client-side `fileSizeLimit` check.
+
+**Diagnosis shortcut:** if uploads work below ~15 MB and fail above ~20 MB
+with a 500 and zero logs, it is this. Don't bisect file sizes or chase the
+websocket `max-message-size` parameter — uploads are HTTP POST, not websocket.
+
+**Mitigation:** set the component's `fileSizeLimit` just *below* 19.88 MB so
+the component rejects oversized files client-side with a real message instead
+of letting them 500 silently. Only raise `max-file-size` in web.xml if large
+files are genuinely required — note it is inside the install/image (NOT under
+`data/`), so in Docker it does not survive container recreation unless baked
+into the image, and production gateways need the same edit.
+_Discovered: 2026-08-13_
+
+## Blob Server module (Automation Professionals)
+
+### BlobServe does NOT support HTTP range requests — video/audio cannot seek
+The `/system/blob/<project>/<query>` endpoint answers a `Range:` request with
+`200 OK` and the entire body, never `206 Partial Content`, and sends no
+`Accept-Ranges` header. Verified directly on Blob Serve 1.1.0 / Ignition 8.3.7:
+
+```bash
+curl -s -D- -o /dev/null -H "Range: bytes=0-1023" \
+  "http://<gw>/system/blob/<project>/BLOB/get?id=<id>"   # -> HTTP/1.1 200 OK
+```
+
+Consequence: an `<video>`/Video Player fed from BlobServe **plays but cannot
+scrub** — dragging the scrubber does nothing, because seeking requires range
+support. There is no setting to change; the module is minimal by design
+(its author describes it as ~352 lines of Java). Images and PDFs are
+unaffected (they load whole anyway).
+
+If a project needs seekable media, plan for a different serving path (a
+WebDev endpoint that implements ranges, or static hosting) rather than
+assuming BlobServe will do it. Decide this BEFORE building UI around video.
+_Discovered: 2026-08-13_
 
 ## Playwright e2e testing (debug-tools)
 
