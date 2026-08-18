@@ -5,7 +5,9 @@ description: >-
   one repo. Trigger it whenever the user wants to: run several Claude/coding agents
   (or one agent across multiple tasks) on the same repo at once without them
   clashing; "set up agent environments" or parallel isolated sandboxes;
-  create/provision/serve/list/destroy an isolated environment off a branch; give
+  create/provision/serve/list/destroy an isolated environment off a branch; work
+  side by side with a person on one repo (they on a branch in the main checkout,
+  agents in envs); give
   each git worktree its own ports, dependencies (node_modules/vendor/.venv), or
   database automatically; or stop two dev servers (e.g. `npm run dev`) fighting
   over the same port. Also trigger when operating an existing setup:
@@ -27,7 +29,9 @@ provisioned to run the whole project in isolation: copy-on-write-cloned
 dependencies, a unique port set, its own config and logs, and (where a stack has
 local state) its own database/services. Several environments run at once without
 fighting over ports, dependencies, or branches, so multiple agents (or you,
-across multiple tasks) can work truly in parallel.
+across multiple tasks) can work truly in parallel. A person working directly in
+the main checkout is just one more of those workspaces: see
+[Working alongside a person](#working-alongside-a-person).
 
 The system is a single project-local script, `scripts/agent-env.sh`, plus a
 small in-dev guard and a short CLAUDE.md section. This skill ships a clean,
@@ -123,6 +127,17 @@ CLAUDE.md too. The reasoning:
   rule. (Recovery if it already happened: the changes are uncommitted on `main`;
   `git -C <main> stash push -- <files>` then `git -C <worktree> stash pop` moves
   them onto the branch and leaves `main` clean — worktrees share one stash list.)
+- **Never assume the main checkout is on the default branch.** It is a workspace
+  like any other, and in the human+agent mode a person is sitting in it on their
+  own branch. Read it rather than guess, and rather than interrupt them to ask:
+  `agent-env.sh list` prints its branch and dirty state as a header line, and
+  `create` and `provision` print it at the two moments it changes an outcome.
+  Envs always branch from the **base ref** (default `main`), never from whatever
+  is checked out there, and `create` refuses a base ref that does not exist,
+  naming the repo's real default branch. Note that `provision` seeds a new env
+  from the main checkout's *working tree* (config file, dependency dirs), so a
+  new env inherits whatever branch is sitting there; the lockfile reconcile
+  repairs dependencies, but a branch-local config edit carries over.
 - **What you can verify in an env**: unit/integration tests, builds, and
   curl/supertest against the env's own ports. Anything pinned to a **fixed
   external address** (a sideloaded manifest, an OAuth redirect URI, a webhook,
@@ -142,6 +157,36 @@ CLAUDE.md too. The reasoning:
 - **Don't hand-rename env branches.** `provision` owns and enforces the canonical
   name (`worktree-<name>` by default) in the one place both creation paths run
   through, so they can't diverge.
+
+### Working alongside a person
+
+The side-by-side case: a person works in the **main checkout** on their own
+branch while agents work in envs. Nothing about it is special: an env isolates a
+branch, dependencies, config, ports and (where the stack has them) databases
+regardless of who or what occupies the main checkout. Only these surfaces are
+shared, and each has a rule:
+
+| Shared | Rule |
+|---|---|
+| The main checkout's HEAD and working tree | Never assume it is on the default branch (cardinal rule above). Never `checkout`/`switch`/`stash`/`clean`/`reset` there. It is someone's live workspace, and `git stash` is **one list across all worktrees**, so a stash of theirs is visible, and poppable, from an env. |
+| The main ports | Takeover QA (`serve <name> --main-ports`) needs them free. Ask before stopping a dev server you did not start; `serve` names this cause when the port is busy. |
+| One `.git` | Branches, hooks and refs are shared; a branch checked out in one worktree cannot be checked out in another. Env branches live in their own `worktree-` namespace, so a person's `feature/...` branch never collides. |
+| The repo root | `git clean -fdx` there deletes every env (cardinal rule above). |
+
+What does **not** change: the pre-PR workflow is branch-scoped, so
+`/review-with-codex --scope branch --base main` stays correct no matter what the
+main checkout has checked out (`main` is a ref, not a checkout). Nor does the
+`destroy` guard, with one consequence worth knowing: it counts commits reachable
+only from the env branch across **all** local branches and remotes, so once the
+person merges an env branch into theirs, that env's commits are no longer unique
+and `destroy` will delete the branch as carrying nothing found nowhere else.
+That is the intended outcome (the work lives on their branch), just not an
+obvious one.
+
+Wire [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh) as a
+`SessionStart` hook in any repo worked this way (setup step 4). It reports the
+main checkout's branch and dirty state at the top of every session, which is
+what makes "check, don't assume" automatic rather than a habit to remember.
 
 ### The pre-PR workflow (in an env)
 
@@ -314,6 +359,32 @@ default `13000` collides if two repos keep it (probe + detail in
   `"destroy": "./scripts/agent-env.sh destroy"`.
   (npm forwards positional args without `--`, so `npm run serve <name>` works;
   flags like `--force` need the script called directly.)
+- Wire [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh) as a
+  project `SessionStart` hook. Optional for an agent-only repo, but **do it
+  whenever a person also works in this repo's main checkout**: it is what tells
+  every session which branch that checkout is on, instead of leaving each one to
+  assume or to ask. Silent when no envs exist. Put it in
+  `.claude/settings.local.json` (the local file, so it never lands in a shared
+  repo) and point it at the skill's copy, which keeps it current as the hook
+  gains fixes:
+
+  ```json
+  {
+    "hooks": {
+      "SessionStart": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"$HOME/.claude/skills/agent-environments/assets/session-start-reanchor.sh\"",
+              "timeout": 10
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
 
 ### 5. Add the CLAUDE.md section
 
@@ -425,10 +496,14 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   from git's own on-disk layout rather than a path pattern, so it covers every
   worktree location: `.claude/worktrees/`, the WordPress flow's envs outside the
   repo, and any custom `ENV_PARENT`. Fails open.
-- [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh): an optional
-  `SessionStart` hook that reminds a resumed session to verify via `agent-env.sh run
-  <name> -- <cmd>` when provisioned envs exist — the proactive companion to the
-  re-anchor cardinal rule. Self-contained, silent when no envs exist, always exits 0.
+- [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh): a
+  `SessionStart` hook that fires when provisioned envs exist. It reminds a resumed
+  session to verify via `agent-env.sh run <name> -- <cmd>` (the proactive companion
+  to the re-anchor cardinal rule), and reports the main checkout's current branch
+  and dirty state (the companion to the never-assume rule, and the reason a
+  side-by-side session does not have to ask). Optional for agent-only repos,
+  recommended wherever a person also works in the main checkout. Self-contained,
+  silent when no envs exist, always exits 0.
 - [`assets/claudemd-section.md`](assets/claudemd-section.md): templated CLAUDE.md
   section (the thin always-loaded layer).
 - [`references/stacks.md`](references/stacks.md): per-knob and per-stack

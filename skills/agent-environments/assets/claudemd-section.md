@@ -66,6 +66,15 @@ queue worker." >
   merge/pull/rebase changes `<LOCKFILES, e.g. package-lock.json>`, so the checkout
   can't end up with a manifest listing a package nobody installed. Don't be
   surprised by an install on `git pull`; don't `rm` `.githooks/`.
+- **<Someone else may be working in the main checkout.>** <Include this bullet
+  when a person also works in this repo directly (the human+agent mode); delete
+  it for agent-only repos. > Never assume the main checkout is on the default
+  branch: `./scripts/agent-env.sh list` prints its current branch and dirty
+  state, and `create`/`provision` print it too. Envs always branch from the base
+  ref (default `main`), never from whatever is checked out there. Don't switch
+  branches, stash, `git clean`, or take the main ports (takeover QA) in that
+  checkout without asking first; `git stash` in particular is one shared list
+  across all worktrees.
 - **Never run `git clean -fdx` at the main checkout root**: envs are nested and
   gitignored, so `-x` would delete them all.
 - **Branch naming is automatic** (`<worktree>-<name>`); don't hand-rename env

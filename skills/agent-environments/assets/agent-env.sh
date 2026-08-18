@@ -202,6 +202,37 @@ main_root() {
   dirname "$common"
 }
 
+# --- the main checkout is NOT necessarily on the default branch --------------
+# A person may be working in it, on their own branch, while agents work in envs
+# (the human+agent mode). So nothing here infers a branch from what happens to
+# be checked out: `create` takes an explicit base ref, and every command that
+# reads the main checkout's working tree prints the branch it read, so a wrong
+# assumption surfaces in the transcript instead of in someone's diff.
+main_branch() {  # <main-root> -> branch name; empty when detached
+  git -C "$1" symbolic-ref --quiet --short HEAD 2>/dev/null || true
+}
+
+main_state() {  # <main-root> -> "<branch> (clean|dirty)"
+  local b d
+  b=$(main_branch "$1")
+  [[ -n "$b" ]] || b="detached at $(git -C "$1" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  if [[ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ]]; then d=dirty; else d=clean; fi
+  printf '%s (%s)\n' "$b" "$d"
+}
+
+# Best guess at this repo's default branch. Used only to make an error message
+# actionable on a repo that doesn't call it `main`.
+default_branch() {  # <main-root>
+  local d
+  if d=$(git -C "$1" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); then
+    echo "${d##*/}"; return
+  fi
+  for d in main master trunk; do
+    if git -C "$1" show-ref --verify --quiet "refs/heads/$d"; then echo "$d"; return; fi
+  done
+  main_branch "$1"
+}
+
 # Resolve a name-or-path argument to an absolute env path.
 resolve_env() {
   local arg="$1" main="$2"
@@ -301,6 +332,10 @@ cmd_provision() {
   local ports=() p
   while read -r p; do ports+=("$p"); done < <(ports_for_slot "$slot")
 
+  # Seeding copies from the MAIN CHECKOUT's working tree (config file, dependency
+  # dirs, credentials), so what lands here depends on the branch checked out
+  # there, which is not necessarily the default branch. Say which one it was.
+  say "seeding from main checkout on $(main_state "$main")"
   project_seed_env_files "$main" "$env"
 
   mkdir -p "$env/logs" "$env/.agent-env"
@@ -426,6 +461,15 @@ cmd_create() {
     die "--resume needs an existing branch $branch, but none exists"
   fi
 
+  # The base ref is explicit and is never inferred from the main checkout's HEAD:
+  # a person may be sitting on their own branch there, and silently branching an
+  # env off their work-in-progress would be a mess to unpick later.
+  git -C "$main" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
+    || die "base ref '$base' not found; this repo's default branch looks like '$(default_branch "$main")' (usage: agent-env.sh create $name <base-ref>)"
+  say "main checkout is on $(main_state "$main")"
+  [[ "$(main_branch "$main")" == "$base" ]] \
+    || warn "main checkout is not on '$base'; '$name' still branches from '$base' (pass a base-ref to branch from something else)"
+
   say "creating worktree $wt (branch $branch from $base)"
   git -C "$main" worktree add -b "$branch" "$wt" "$base" --quiet
   cmd_provision "$wt"
@@ -493,7 +537,7 @@ cmd_serve() {
   for port in "${ports[@]}"; do
     if port_busy "$port"; then
       if (( use_main_ports )); then
-        die "port $port is in use; stop the main checkout's dev server ($MAIN_DEV_CMD) before takeover QA"
+        die "port $port is in use; stop the main checkout's dev server ($MAIN_DEV_CMD) before takeover QA. If you did not start it, someone else is working in the main checkout (on $(main_state "$main")); ask before stopping it."
       fi
       die "port $port is in use; is another copy of '$name' or a stale process (agent-env.sh stop $name), or another repo's agent-env sharing PORT_BASE=$PORT_BASE (ports are machine-global)? If a different project owns it, leave it running and give THIS repo a distinct PORT_BASE, then re-provision."
     fi
@@ -540,6 +584,7 @@ cmd_stop() {
 cmd_list() {
   local main wt branch dirty uniq ports serving
   main=$(main_root)
+  printf 'main checkout: %s  [%s]\n\n' "$main" "$(main_state "$main")"
   printf '%-22s %-32s %-7s %-9s %-13s %s\n' "NAME" "BRANCH" "DIRTY" "UNIQUE" "PORTS" "SERVING"
   git -C "$main" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}' |
   while read -r wt; do

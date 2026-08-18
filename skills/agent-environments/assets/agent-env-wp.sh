@@ -112,6 +112,18 @@ sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_'; }
 # ---- WordPress-specific helpers -------------------------------------------
 repo_root() { git -C "$1" rev-parse --show-toplevel 2>/dev/null || die "not inside a git repo: $1"; }
 
+# The theme/plugin repo's branch and dirty state. This checkout plays the "main
+# checkout" role here, and in the human+agent mode a person is working in it on
+# their own branch, so nothing may assume it sits on the default branch. Read it
+# and print it instead.
+repo_state() {  # <repo-root> -> "<branch> (clean|dirty)"
+  local b d
+  b=$(git -C "$1" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+    || b="detached at $(git -C "$1" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  if [[ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ]]; then d=dirty; else d=clean; fi
+  printf '%s (%s)\n' "$b" "$d"
+}
+
 wp_root() {  # walk up from $1 until a dir holds wp-config.php
   local d; d=$(cd "$1" && pwd)
   while [[ "$d" != "/" ]]; do
@@ -254,13 +266,26 @@ cmd_create() {
   site=$(basename "$wproot")
   rel="${repo#"$wproot"/}"
   [[ "$rel" != "$repo" ]] || die "repo $repo is not inside the WP install $wproot"
-  [[ -z "$base" ]] && base=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
+  if [[ -z "$base" ]]; then
+    # WP repos usually sit on a long-lived feature branch, so the current branch
+    # is the right default here (unlike the generic engine, which defaults to
+    # `main`). Announce it: if a person is also working in this checkout, the
+    # default inherits THEIR branch, which is rarely what was intended.
+    base=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
+    say "no base-ref given; branching from the checkout's current branch '$base'"
+    [[ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ]] \
+      || warn "that checkout has uncommitted changes; an env branches from the last COMMIT, so they will not be in it"
+  fi
   branch=$(canonical_branch "$name")
   # The name pattern above still admits refs git rejects ('a..b', 'a.', 'a.lock').
   # Catch that here rather than at `git worktree add`, which runs after the claim,
   # slot, metadata and a full clone — a failure there costs a manual destroy.
   git check-ref-format "refs/heads/$branch" 2>/dev/null \
     || die "name '$name' makes an invalid git branch ($branch); avoid '..', a trailing '.', and the '.lock' suffix"
+  # Same rationale for the BASE ref: a bad one otherwise surfaces at `git
+  # worktree add`, which runs after the claim, slot, metadata and a 1.8 GB clone.
+  git -C "$repo" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
+    || die "base ref '$base' not found in $repo (usage: create <name> [base-ref])"
   install="$ENV_PARENT/${site}__${name}"
 
   # Serialize creates of the SAME name. The install-path check below is a
@@ -529,7 +554,8 @@ cmd_stop() {
 cmd_list() {
   local repo wpdir base; repo=$(repo_root "$PWD")
   base="$repo/.agent-env/wp"
-  printf '%-20s %-26s %-9s %-22s %s\n' "NAME" "BRANCH" "PORT" "DB" "SERVING"
+  printf 'repo checkout: %s  [%s]\n\n' "$repo" "$(repo_state "$repo")"
+  printf '%-20s %-26s %-9s %-30s %s\n' "NAME" "BRANCH" "PORT" "DB" "SERVING"
   [[ -d "$base" ]] || return 0
   local ed name
   for ed in "$base"/*/; do
@@ -538,7 +564,7 @@ cmd_list() {
       # shellcheck disable=SC1091
       source "$ed/meta.env"
       serving=no; server_alive "$ed/web.pid" "$AGENT_ENV_WEB_PORT" && serving=yes
-      printf '%-20s %-26s %-9s %-22s %s\n' "$AGENT_ENV_NAME" "$AGENT_ENV_BRANCH" "$AGENT_ENV_WEB_PORT" "$AGENT_ENV_DB" "$serving"
+      printf '%-20s %-26s %-9s %-30s %s\n' "$AGENT_ENV_NAME" "$AGENT_ENV_BRANCH" "$AGENT_ENV_WEB_PORT" "$AGENT_ENV_DB" "$serving"
     )
   done
 }
