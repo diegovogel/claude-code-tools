@@ -505,6 +505,28 @@ expected String instance, got PyDictionary` (the path string slides into the
 `tx` slot). When handing test snippets to a user, match the scope they'll run
 in. _Discovered: 2026-08-05_
 
+### A new named query defaults to NO database connection
+The Database Connection dropdown on a freshly created named query starts
+blank, and nothing in the Designer flags it. The failure surfaces only at
+runtime, wrapped in layers of Java stack, as:
+
+```
+java.lang.IllegalArgumentException: Cannot find database connection - name cannot be empty.
+```
+
+which reads like a broken connection rather than an unset dropdown. Symptom
+in a Perspective session: the action silently does nothing (a property-change
+script or button appears dead) while the query itself is fine when tested in
+the Designer's Testing tab, because that tab makes you pick a connection.
+When several queries are added in one sitting, check them all at once:
+
+```bash
+for f in <project>/ignition/named-query/**/resource.json; do
+  python3 -c "import json,sys;print(sys.argv[1], json.load(open(sys.argv[1]))['attributes'].get('database','<EMPTY>'))" "$f"
+done
+```
+_Discovered: 2026-08-20_
+
 ### BLOB named-query params (sqlType 20) base64-decode STRING values — pass byte[], never str
 If a named-query parameter of Ignition type BLOB (sqlType 20) receives a
 string, Ignition treats it as base64 and silently DECODES it into the stored
