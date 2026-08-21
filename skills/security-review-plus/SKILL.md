@@ -1,13 +1,14 @@
 ---
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git show:*), Bash(git remote show:*), Bash(git add composer.json composer.lock), Bash(git commit:*), Bash(php artisan checkpoint:scan:*), Bash(/opt/homebrew/bin/php artisan checkpoint:scan:*), Bash(composer require:*), Bash(/opt/homebrew/bin/composer require:*), Read, Glob, Grep, LS, Task, AskUserQuestion, Write
+name: security-review-plus
 description: Wraps /security-review with a curated checklist pass, plus a Checkpoint whole-app scan on Laravel projects
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git show:*), Bash(git remote show:*), Bash(git add composer.json composer.lock), Bash(git commit:*), Bash(php artisan checkpoint:scan:*), Bash(/opt/homebrew/bin/php artisan checkpoint:scan:*), Bash(composer require:*), Bash(/opt/homebrew/bin/composer require:*), Read, Glob, Grep, LS, Task, AskUserQuestion, Write
 ---
 
-You are running a three-phase security review. Phase 1 is the built-in `/security-review` (delegated to a subagent so we always pick up the latest version). Phase 2 is a checklist walk against a curated tips file. Phase 3 is a Checkpoint whole-application scan, Laravel projects only. Output one unified markdown report.
+You are running a three-phase security review. Phase 1 is the built-in `/security-review` (delegated to a subagent so we always pick up the latest version). Phase 2 is a checklist walk against the curated tips file bundled with this skill. Phase 3 is a Checkpoint whole-application scan, Laravel projects only. Output one unified markdown report.
 
 ## Step 1: Load the curated tips checklist
 
-Read `/Users/diego/.claude/memory/security-tips-srees.md` in full. Each entry has a **detection heuristic**, you will apply every one of them in Phase 2. If the file cannot be read, abort with a clear error, do not silently skip Phase 2.
+Read `security-tips.md` from this skill's directory (the same directory this SKILL.md was loaded from) in full. Each entry has a **detection heuristic**, you will apply every one of them in Phase 2. If the file cannot be read, abort with a clear error, do not silently skip Phase 2.
 
 ## Step 2: Phase 1, delegate to a subagent
 
@@ -21,14 +22,11 @@ Do NOT replicate the built-in skill's logic here. The whole point of delegating 
 
 ## Step 3: Phase 2, curated tips checklist
 
-Gather the diff yourself for Phase 2 (the subagent worked on the same branch but its context is gone):
+Gather the diff yourself for Phase 2 (the subagent worked on the same branch but its context is gone). Run both of these now:
 
 ```
-!`git diff --name-only origin/HEAD...`
-```
-
-```
-!`git diff origin/HEAD...`
+git diff --name-only origin/HEAD...
+git diff origin/HEAD...
 ```
 
 If `origin/HEAD` is unset or the diff is empty, fall back to `main...HEAD`.

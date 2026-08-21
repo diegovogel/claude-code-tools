@@ -28,7 +28,6 @@ PATHS=(
   commands/manual-qa.md
   commands/pr-with-codex.md
   commands/review-with-codex.md
-  commands/security-review-plus.md
   commands/session-wrapup.md
   commands/start-todoist-task.md
 
@@ -39,6 +38,7 @@ PATHS=(
   skills/agent-environments
   skills/working-with-ignition-designer
   skills/brainstorm-with-panel
+  skills/security-review-plus
 
   # Templates — single file; the rest of ~/.claude/templates is not tracked.
   templates/diegos-engineering-guidelines.md

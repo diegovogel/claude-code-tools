@@ -17,7 +17,6 @@ Some tools require additional dependencies as noted in their details below.
 ### Commands
 * [start-todoist-task](#command-start-todoist-task): fetches task details and creates a plan to complete it.
 * [manual-qa](#command-manual-qa): creates a comprehensive manual QA procedure and walks through it with me.
-* [security-review-plus](#command-security-review-plus): runs a security review that includes a curated checklist of security tips.
 * [review-with-codex](#command-review-with-codex): Claude goes through several rounds of review with Codex.
 * [session-wrapup](#command-session-wrapup): finds valuable information in a session and saves it for future reference by Claude.
 
@@ -25,6 +24,7 @@ Some tools require additional dependencies as noted in their details below.
 * [Ignition Designer](#skill-working-with-ignition-designer): a collection of tips and workflows that improve Claude's ability to build and debug [Ignition Perspective](https://inductiveautomation.com/ignition/modules/perspective) projects.
 * [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments.
 * [brainstorm-with-panel](#skill-brainstorm-with-panel): a phased, multi-agent workflow for generating and evaluating creative solutions to hard problems.
+* [security-review-plus](#skill-security-review-plus): runs a security review that includes a curated checklist of security tips.
 
 ### Other
 * [Diego's Engineering Guidelines](#document-diegos-engineering-guidelines): a set of engineering rules for Claude to follow, based on nine years of web dev.
@@ -62,21 +62,6 @@ Some tools require additional dependencies as noted in their details below.
 * If a small problem is found, Claude fixes it and continues the QA procedure. If a big problem is found, it stops the procedure because it should be restarted from the beginning after major changes.
 * Explicitly instructs Claude to not skip any steps because sometimes Claude likes to cut corners.
 * Automatically detects if the project uses parallel agent environments and serves the one tied to the current session.
-
-### Command: `security-review-plus`
-
-[View source](commands/security-review-plus.md)
-
-**Why it exists:** Claude Code has a built-in `/security-review` command, which is good but not exhaustive. I wanted to layer my own checklist of accumulated security tips on top and add framework-specific tools, without losing whatever upstream improvements the built-in command picks up over time.
-
-**What it does:** runs three passes and emits one unified report. Pass A runs the built-in `/security-review` via a subagent (so we always pick up the latest version of it). Pass B walks a curated tips file entry-by-entry, applying each tip's detection heuristic to the current branch's diff. Pass C runs Laravel Checkpoint if requirements are met (Laravel and minimum requirements).
-
-**Highlights:**
-* Pass A is delegated to a subagent so the built-in command's "end of turn" semantics don't terminate this command early.
-* Pass B includes a coverage note listing every tip entry that was checked but not flagged. That's the audit trail proving the checklist was actually walked rather than skipped.
-* Before recommending a stored fix, Claude evaluates whether it still applies. Tips can age out as frameworks change, and the stored solution may need adapting.
-* High bar for reporting (confidence >= 8, matching the built-in command) so the report stays signal-heavy.
-* In Pass C, if Checkpoint is not installed, Claude offers to install and run it.
 
 ### Command: `review-with-codex`
 
@@ -180,6 +165,21 @@ The skill also self-improves: when Claude hits a new gotcha that meets the inclu
 **Dependencies:**
 * Codex plugin for Claude (optional but recommended). Without it the skill still runs using only Claude, but you lose the cross-model benefit, which is one of the best parts.
 * A ChatGPT account and subscription for Codex, depending on usage.
+
+### Skill: `security-review-plus`
+
+[View source](skills/security-review-plus/SKILL.md)
+
+**Why it exists:** Claude Code has a built-in `/security-review` command, which is good but not exhaustive. I wanted to layer my own checklist of accumulated security tips on top and add framework-specific tools, without losing whatever upstream improvements the built-in command picks up over time.
+
+**What it does:** runs three passes and emits one unified report. Pass A runs the built-in `/security-review` via a subagent (so we always pick up the latest version of it). Pass B walks the skill's bundled tips file ([security-tips.md](skills/security-review-plus/security-tips.md), distilled from public [Securing Laravel](https://securinglaravel.com/) articles) entry-by-entry, applying each tip's detection heuristic to the current branch's diff. Pass C runs Laravel Checkpoint if requirements are met (Laravel and minimum requirements).
+
+**Highlights:**
+* Pass A is delegated to a subagent so the built-in command's "end of turn" semantics don't terminate this command early.
+* Pass B includes a coverage note listing every tip entry that was checked but not flagged. That's the audit trail proving the checklist was actually walked rather than skipped.
+* Before recommending a stored fix, Claude evaluates whether it still applies. Tips can age out as frameworks change, and the stored solution may need adapting.
+* High bar for reporting (confidence >= 8, matching the built-in command) so the report stays signal-heavy.
+* In Pass C, if Checkpoint is not installed, Claude offers to install and run it.
 
 ### Document: Diego's Engineering Guidelines
 
