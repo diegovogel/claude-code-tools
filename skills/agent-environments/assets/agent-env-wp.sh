@@ -49,7 +49,18 @@ WP="wp"                         # WP-CLI binary
 WP_SERVER_WORKERS=4             # php -S worker count; MUST be >1 or WordPress
                                 # deadlocks (its loopback requests for wp-cron /
                                 # Site Health can't be served by a single worker)
-# URL handling: "search-replace" = rewrite <host> -> 127.0.0.1:<port> in the env
+WEB_HOST="localhost"            # host the env is served and addressed on. Prefer a
+                                # NAME over a bare IP: third-party services that
+                                # restrict by origin/referrer (Font Awesome kits,
+                                # Google Maps / reCAPTCHA keys, Mapbox) allowlist
+                                # DOMAINS, usually permit localhost by default, and
+                                # cannot allowlist an IP at all. On 127.0.0.1 those
+                                # 403 and their widgets silently vanish, so visual
+                                # QA in an env looks like the branch broke the site.
+                                # WEB address only: the mysql -h below stays
+                                # 127.0.0.1 (that is the DB connection, where a
+                                # name would switch TCP for a unix socket).
+# URL handling: "search-replace" = rewrite <host> -> $WEB_HOST:<port> in the env
 # DB so the env is fully self-contained (media/content resolve from the env).
 # "override" = only set WP_HOME/WP_SITEURL (faster; literal .test URLs in stored
 # content still load from the source site via Herd). Override is ALWAYS applied;
@@ -387,19 +398,19 @@ EOF
   "$WP" config set DB_NAME "$db" --path="$install" >/dev/null
 
   # URL: override always; optional full search-replace for self-containment.
-  "$WP" config set WP_HOME "http://127.0.0.1:$web_port" --type=constant --path="$install" >/dev/null
-  "$WP" config set WP_SITEURL "http://127.0.0.1:$web_port" --type=constant --path="$install" >/dev/null
+  "$WP" config set WP_HOME "http://$WEB_HOST:$web_port" --type=constant --path="$install" >/dev/null
+  "$WP" config set WP_SITEURL "http://$WEB_HOST:$web_port" --type=constant --path="$install" >/dev/null
   if [[ "$URL_MODE" == "search-replace" ]]; then
     # `|| true` so a failure here can't abort create under set -e.
     srcurl=$("$WP" option get siteurl --skip-themes --skip-plugins --path="$wproot" 2>/dev/null || true)
     host="${srcurl#*://}"; host="${host%%/*}"
     if [[ -n "$host" ]]; then
-      say "search-replace $host -> http://127.0.0.1:$web_port (DB only; media files untouched)"
+      say "search-replace $host -> http://$WEB_HOST:$web_port (DB only; media files untouched)"
       # Force scheme to http (wp server is http), covering both http:// and
       # https:// source URLs. wp search-replace is serialization-aware.
       local scheme
       for scheme in https http; do
-        "$WP" search-replace "$scheme://$host" "http://127.0.0.1:$web_port" --all-tables-with-prefix \
+        "$WP" search-replace "$scheme://$host" "http://$WEB_HOST:$web_port" --all-tables-with-prefix \
           --skip-columns=guid --report-changed-only --skip-themes --skip-plugins --path="$install" >/dev/null 2>&1 || true
       done
     else
@@ -457,7 +468,7 @@ EOF
   say "  install: $install"
   say "  worktree (edit here): $install/$rel"
   say "  db:      $db"
-  say "  serve:   agent-env-wp.sh serve $name   (-> http://127.0.0.1:$web_port)"
+  say "  serve:   agent-env-wp.sh serve $name   (-> http://$WEB_HOST:$web_port)"
 }
 
 load_env() { # name -> sources meta.env
@@ -503,7 +514,7 @@ cmd_serve() {
   local ed; ed=$(env_dir "$name")
   if server_alive "$ed/web.pid" "$AGENT_ENV_WEB_PORT"; then say "'$name' already serving"; return 0; fi
   port_busy "$AGENT_ENV_WEB_PORT" && die "port $AGENT_ENV_WEB_PORT in use (agent-env-wp.sh stop $name, or a stale process)"
-  say "starting '$name' on http://127.0.0.1:$AGENT_ENV_WEB_PORT"
+  say "starting '$name' on http://$WEB_HOST:$AGENT_ENV_WEB_PORT"
   mkdir -p "$AGENT_ENV_INSTALL/logs"
   # Two deliberate choices here:
   #  - PHP_CLI_SERVER_WORKERS must be >1: WordPress fires loopback HTTP requests
@@ -519,11 +530,11 @@ cmd_serve() {
     set -m
     cd "$AGENT_ENV_INSTALL"
     PHP_CLI_SERVER_WORKERS="$WP_SERVER_WORKERS" nohup "$WP" server \
-      --host=127.0.0.1 --port="$AGENT_ENV_WEB_PORT" --path="$AGENT_ENV_INSTALL" \
+      --host="$WEB_HOST" --port="$AGENT_ENV_WEB_PORT" --path="$AGENT_ENV_INSTALL" \
       >>logs/wp-server.log 2>&1 </dev/null &
     echo $! >"$ed/web.pid"
   )
-  if ! wait_for_url "http://127.0.0.1:$AGENT_ENV_WEB_PORT/" "wp" 60; then
+  if ! wait_for_url "http://$WEB_HOST:$AGENT_ENV_WEB_PORT/" "wp" 60; then
     tail -5 "$AGENT_ENV_INSTALL/logs/wp-server.log" >&2 2>/dev/null || true
     cmd_stop "$name" >/dev/null; die "'$name' failed to start; see $AGENT_ENV_INSTALL/logs/"
   fi

@@ -63,17 +63,28 @@ The per-env DB is a copy of the site's DB (`wp db export | mysql import` into
 stores absolute URLs in the DB:
 
 - **`WP_HOME`/`WP_SITEURL` override is always applied** (the env's wp-config gets
-  `http://127.0.0.1:<port>`). This alone makes admin, login, AJAX, REST, and
+  `http://<WEB_HOST>:<port>`). This alone makes admin, login, AJAX, REST, and
   WP-derived asset URLs use the env. Tested: a **new upload** in the env writes to
   the env's `wp-content/uploads` and gets an env-port URL (fully isolated); existing
   attachments rendered via WP functions (`the_post_thumbnail`, etc.) also resolve to
   the env because WP recomputes them from `WP_SITEURL`.
 - **`search-replace` is additionally run by default** (CONFIG `URL_MODE`), rewriting
-  `http(s)://<host>` -> `http://127.0.0.1:<port>` across the DB. This fixes the one
+  `http(s)://<host>` -> `http://<WEB_HOST>:<port>` across the DB. This fixes the one
   thing the override doesn't: **literal absolute URLs hard-coded in stored content**
   (page builders like Beaver Builder save these). It's cheap and **does not
   duplicate media** (the CoW clone already gave the env its own copy; search-replace
   only edits DB strings). Set `URL_MODE="override"` to skip it on very large DBs.
+
+**`WEB_HOST` defaults to `localhost`, and should stay a name rather than a bare IP.**
+Third-party services that restrict by origin or referrer — Font Awesome kits, Google
+Maps and reCAPTCHA keys, Mapbox — allowlist **domains**, generally permit `localhost`
+by default, and cannot allowlist an IP at all. Served on `127.0.0.1` they return 403
+and their widgets silently fail to render, so visual QA in an env looks like the
+branch broke the site rather than like an environment artifact. This applies only to
+the **web** address; the `mysql -h 127.0.0.1` calls stay as they are, because a
+hostname there makes the client switch from TCP to a unix socket. Note that an env
+bakes its URL into wp-config and the DB at `create` time, so changing `WEB_HOST` only
+affects envs created afterwards.
 
 `--skip-columns=guid` is used (guids are stable identifiers, not display URLs). A
 handful of URLs can remain after search-replace: the skipped guids, and
