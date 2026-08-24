@@ -103,7 +103,10 @@ CLAUDE.md too. The reasoning:
   matter where the shell landed. Prefer it for every cwd-relative command after an
   interruption (`run <name> -- npm test`, `run <name> -- git diff`). It `exec`s the
   command directly, so shell features (pipes, inline env) need `run <name> -- bash
-  -lc '...'`. As a fallback for what `run` doesn't cover, verify `pwd` and
+  -lc '...'`. And `run` only wraps commands you author: a *skill invocation*
+  reads the session cwd itself and cannot be wrapped, so anchor the session
+  with `EnterWorktree` before skill-driven steps (see pre-PR step 0). As a
+  fallback for what `run` doesn't cover, verify `pwd` and
   `git branch --show-current`, then prefer `git -C <worktree>` or an explicit `cd`
   into the env over trusting the cwd. Optional belt-and-suspenders: wire
   `assets/session-start-reanchor.sh` as a project `SessionStart` hook so a resumed
@@ -219,6 +222,17 @@ table of contents every time, run or not. Other chapters around these are
 fine. If the harness has no chapter tool, don't block on it; the report in
 step 7 still carries the full record.
 
+0. **Anchor the session in the env worktree.** Steps 2–6 are *skill
+   invocations*, and a skill reads the **session cwd**: its pre-gathered
+   context (git status, the diff it reviews) and its cwd-relative commands
+   run wherever the session sits, and `run <name> -- <cmd>` cannot wrap a
+   skill. Use `EnterWorktree` with `path:` pointing at the env's worktree
+   (it adopts any worktree in `git worktree list`, including the WordPress
+   flow's envs outside the repo), or at minimum assert `pwd` before each
+   skill step. Observed failure without this: the built-in
+   `/security-review` pre-gathered its git status and diff from the main
+   checkout (clean, on `main`) and returned a confident "no findings" over
+   an empty diff.
 1. **Verify** — the env's own test + build commands, via `run <name> -- <cmd>`.
 2. **`/simplify`** — quality cleanup of the diff (reuse, dead code, altitude).
 3. **`/security-review-plus`** — *if warranted*. It's cheap, so the bar is low:
