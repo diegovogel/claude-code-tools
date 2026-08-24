@@ -37,6 +37,25 @@ verified piece at a time, and when a piece breaks, bisect to find where. A
 failure with no browser console error almost always means the error is
 gateway-side, so read `system_logs.idb` before theorizing. _Discovered: 2026-06-02_
 
+### Disk shows SAVED state — an unsaved Designer edit is invisible to you
+When the user reports "X doesn't work" and you inspect `view.json`, `code.py`,
+or `query.sql` on disk, you are reading what was last **saved**, not what is
+on their screen. Designer holds unsaved edits in memory, and its Script
+Console even executes against that in-memory copy — so a function can pass a
+console test while the file on disk has never heard of it.
+
+Two symptoms that look like different bugs but are the same thing:
+
+- Disk lacks a method/edit the user is certain they made → not saved yet.
+- A console test passes but the same call fails from a running session → the
+  console used Designer's memory; the gateway serves the saved version.
+
+So when disk contradicts the user, say so plainly and name both possibilities
+("this isn't on disk — either it wasn't applied or the project isn't saved")
+rather than assuming they skipped a step. Confirming with a one-line grep is
+faster than debugging the wrong layer.
+_Discovered: 2026-08-21_
+
 ### Check the component's built-in props BEFORE building a custom version
 Ignition's stock components are richer than they look from a glance at the
 "Add Component" menu. Before wiring a custom search input, custom pager,
