@@ -121,7 +121,19 @@ canonical_branch() { printf '%s%s\n' "$CANONICAL_BRANCH_PREFIX" "$1"; }
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_'; }
 
 # ---- WordPress-specific helpers -------------------------------------------
-repo_root() { git -C "$1" rev-parse --show-toplevel 2>/dev/null || die "not inside a git repo: $1"; }
+# The MAIN checkout, resolved from anywhere -- including from inside an env's own
+# worktree. Do not "simplify" this back to --show-toplevel: that returns the current
+# worktree, so every lookup below then misses (env metadata lives under the main
+# checkout), `run`/`serve`/`destroy` report the env as unknown, and `create` resolves
+# wp_root to the ENV's WordPress install and clones that instead of the real site.
+# --git-common-dir is the shared .git every worktree points back to; the generic
+# engine's main_root() in agent-env.sh does the same thing.
+repo_root() {
+  local common
+  common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || die "not inside a git repo: $1"
+  dirname "$common"
+}
 
 # The theme/plugin repo's branch and dirty state. This checkout plays the "main
 # checkout" role here, and in the human+agent mode a person is working in it on
