@@ -120,6 +120,47 @@ that loads a compiled file from disk fails. Add a one-shot compile to the create
 flow's per-project section (tab-handbook does `node_modules/.bin/sass scss:.`
 after npm deps).
 
+## Operating while anchored in the worktree (`EnterWorktree`)
+
+The pre-PR workflow anchors the session in the env's theme/plugin worktree.
+Because that path is outside `.claude/worktrees/`, adoption always asks for
+approval once (runtime design, no allow rule suppresses it), and the session
+then runs under the runtime's worktree isolation until `ExitWorktree`: Bash is
+statically vetted to stay inside the worktree (SKILL.md, "What `EnterWorktree`
+switches on"). In WP terms:
+
+- **Plain `wp <command>` from the worktree just works.** WP-CLI walks up from
+  the cwd to the env's `wp-config.php`, so an anchored session needs no
+  `--path` and no `cd` for `wp option get/update`, `wp db query`,
+  `wp cache flush`, `wp plugin list`, and so on. Single plain commands with
+  literal arguments pass the vetting; that one habit covers most day-to-day
+  operations.
+- **The lifecycle script keeps working.** `scripts/agent-env-wp.sh
+  serve/stop/list <name>` is a plain invocation of a file inside the worktree
+  (the vetting reads the command line; the script does its own env-root work).
+  `destroy` is the exception: run it only after `ExitWorktree`, never from
+  inside the worktree it removes.
+- **Anything containing `eval` is refused**, including WP-CLI's `wp eval` and
+  `wp eval-file` (pattern-matched as shell eval, no override). Replacement for
+  arbitrary PHP from an anchored session: write the code to a file in the
+  worktree whose first line `require`s the env's `wp-load.php`, then run
+  `php <file>`. That boots the env's WordPress the classic way with no eval
+  token on the command line (same boot as the site; only `WP_CLI`-specific
+  helpers are absent). Or do the PHP-heavy work before anchoring / after
+  `ExitWorktree`.
+- **No `cd "$ENVROOT" && ...` compounds.** The vetting cannot trace a variable
+  working directory. Stay in the worktree and pass literal absolute paths as
+  arguments when a tool must be pointed at the install root
+  (`mysql -h 127.0.0.1 <db>` needs no cwd at all).
+- **Git is confined to this worktree.** `git -C` at the source checkout, the
+  sibling-worktree add/prune below, and cross-worktree stash recovery are all
+  refused while anchored; do them from a non-anchored session.
+
+Sequencing rule of thumb: `create`, provisioning checks, DB surgery, and
+config verification before anchoring; anchor for implementation and the
+pre-PR steps (all in-worktree); `ExitWorktree` for teardown or unrestricted
+env-root work.
+
 ## Sibling-repo work in one env (theme + plugin)
 
 A feature that spans both custom repos (e.g. tab-handbook's theme + plugin) can use
@@ -137,6 +178,10 @@ handle:
 - **Stop anything running FROM the sibling worktree before `destroy`.** In
   particular a plugin's wp-env (`node_modules/.bin/wp-env stop`): Docker holds
   mounts of the path `destroy` is about to delete.
+
+Both sibling operations are git commands targeting another repo, so run them
+from a session that is not anchored via `EnterWorktree` (isolation confines
+git to the anchored worktree; see the section above).
 
 ## Other notes
 

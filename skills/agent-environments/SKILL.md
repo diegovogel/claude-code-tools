@@ -83,6 +83,43 @@ meaningful task-derived name, then run `scripts/agent-env.sh provision`. Or adop
 a pre-built one: `EnterWorktree` with `path: .claude/worktrees/<name>`.
 `EnterWorktree` adopts any worktree that appears in `git worktree list`, and
 never removes an adopted worktree on `ExitWorktree`, so both paths are safe.
+Entering also changes how the session may operate; see
+[the next section](#what-enterworktree-switches-on-approval-and-isolation).
+
+### What `EnterWorktree` switches on: approval and isolation
+
+Entering a worktree changes the session in two ways. Both are runtime behavior
+(documented at code.claude.com/docs/en/worktrees), not settings problems; no
+permission rule makes either go away, so don't burn time hunting for one.
+
+- **Approval.** A bare `EnterWorktree` allow rule in `~/.claude/settings.json`
+  silences the prompt for worktrees under `.claude/worktrees/`, the standard
+  flow. A model-supplied `path` **outside** that directory (the WordPress
+  flow's envs) relocates the session's permission root, and the runtime always
+  asks once, by design: no allow rule or "don't ask again" suppresses it (only
+  `bypassPermissions` mode does, which we don't use). Expect exactly one
+  prompt per out-of-tree adoption; that is working as intended, not a
+  misconfigured allow rule.
+- **Isolation.** From then until `ExitWorktree`, the runtime statically vets
+  every Bash command to verifiably stay inside the worktree. It refuses: file
+  edits targeting the main checkout; commands whose working directory it
+  cannot trace (compound `cd` chains, `cd "$VAR"`); git aimed anywhere but
+  this worktree (`git -C <main>`, `--git-dir`, `GIT_DIR`); and shapes it
+  cannot statically verify, e.g. brace expansion, heredocs with unquoted
+  delimiters, and anything containing an `eval` token, **including WP-CLI's
+  `wp eval` / `wp eval-file`** (a false positive with no override). The
+  vetting cannot be disabled or scoped, `permissions.additionalDirectories`
+  does not relax it, and subagents spawned from the session inherit it.
+
+Living with isolation: phrase Bash as single plain commands with literal
+arguments, run from the worktree cwd (arguments may *point* elsewhere, e.g.
+`wp --path=<install> option get x` passes; the vetting cares about working
+directory, git targets, and traceability). Sequence work that genuinely lives
+outside the worktree (the WordPress flow's env root) before entering or after
+`ExitWorktree`, and run `destroy` only from a non-anchored session, never from
+inside the worktree it is about to remove. WordPress specifics (what still
+works while anchored, and the `wp eval` replacement) are in
+[`references/wordpress.md`](references/wordpress.md).
 
 ### The cardinal rules (why they exist)
 
@@ -232,7 +269,12 @@ step 7 still carries the full record.
    skill step. Observed failure without this: the built-in
    `/security-review` pre-gathered its git status and diff from the main
    checkout (clean, on `main`) and returned a confident "no findings" over
-   an empty diff.
+   an empty diff. Adopting a WordPress env (outside `.claude/worktrees/`)
+   asks for approval once, by design, and turns on Bash isolation (see
+   [What `EnterWorktree` switches on](#what-enterworktree-switches-on-approval-and-isolation));
+   steps 1-6 all operate inside the worktree, so they run under isolation
+   without friction. Env-root work is the exception: do it before anchoring,
+   or per [`references/wordpress.md`](references/wordpress.md).
 1. **Verify** — the env's own test + build commands, via `run <name> -- <cmd>`.
 2. **`/simplify`** — quality cleanup of the diff (reuse, dead code, altitude).
 3. **`/security-review-plus`** — *if warranted*. It's cheap, so the bar is low:

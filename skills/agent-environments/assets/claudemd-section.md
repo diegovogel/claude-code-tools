@@ -18,7 +18,10 @@ queue worker." >
 - **Create your own env mid-session**: `EnterWorktree` with a task-derived name,
   then `./scripts/agent-env.sh provision`. Or adopt a pre-built env via
   `EnterWorktree` with `path: .claude/worktrees/<name>` (built with
-  `./scripts/agent-env.sh create <name>`).
+  `./scripts/agent-env.sh create <name>`). Entering turns on the runtime's
+  worktree isolation until `ExitWorktree`: Bash is statically vetted to stay in
+  the worktree (single plain commands; no heredocs with unquoted delimiters, no
+  `eval` tokens, git confined to the worktree).
 - **Ports**: slot N → `<PORT_BASE + STRIDE*N>` (slot 1 = `<13002/13003>`). Each
   env takes the lowest free slot; `destroy` frees it for reuse.
 - **Inside an env, NEVER run `<MAIN_DEV_CMD, e.g. npm run dev>`**: it is pinned
