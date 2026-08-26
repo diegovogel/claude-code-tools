@@ -53,6 +53,7 @@ Standing engineering rules I expect to apply on any project I work on. Stack-agn
 - If a refactor "needs" test changes to keep passing, behavior changed. Stop and figure out what.
 - Don't delete or permanently skip tests to make CI green. Fix the underlying cause.
 - Refactoring code for testability is fine. Wrapping everything in deep abstractions purely for testability is not.
+- A passing check licenses only the claim it actually tested. The presence of an artifact (an attribute in the markup, a config key, a registered handler, a file on disk) is not evidence of the behavior it is supposed to produce. Assert the observable behavior end-to-end at least once. A wall of green on adjacent checks is not a substitute for the one assertion that states the goal.
 - For UI / frontend changes: type-checks and unit tests verify code, not user experience. Run the dev server, use the feature in a browser, monitor the console for errors. If the environment doesn't allow that, say so explicitly rather than claiming success.
 
 ## Debugging
@@ -63,6 +64,8 @@ Standing engineering rules I expect to apply on any project I work on. Stack-agn
 - Methodology: stop making changes; preserve evidence (logs, error messages, stack traces, repro steps); reproduce; isolate to the minimal failing case; fix the root cause; add a regression test that fails without the fix; resume.
 - Isolate by binary search, don't rewrite-and-guess. When a flow breaks, pick the midpoint of the failing path and check the actual value or output there (a log line, a DB row, an intermediate variable, a network response). If the problem already shows at the midpoint, the fault is upstream; if the midpoint is healthy, it's downstream. Halve the suspect half and repeat until you're down to a single function, query, or line. That pinpoints the exact break instead of guessing and re-running.
 - When fixing a known bug, write the failing test first. The test demonstrates the bug exists; the fix makes it pass; the test guards against recurrence.
+- Explaining away is not ruling out. When a measurement contradicts what you expected, the explanation you reach for is a new falsifiable claim, not a resolution. Test it, or write it down as untested and treat the question as still open. A plausible story costs nothing to invent and proves nothing; the anomaly is resolved when a measurement changes, not when an explanation arrives.
+- When a direct measurement and a proxy disagree, the direct one wins, and the proxy becomes its own anomaly. A proxy can improve for reasons unrelated to your change working, so a good proxy number never licenses ignoring a bad direct one. Ask how both can be true at once; that question usually names the cause faster than debugging does.
 - Errors compound. Don't continue feature work on top of a failure.
 - Find the root cause before fixing. Don't bypass safety checks, suppress warnings, or skip the failing path to make the symptom go away.
 - When an issue affects only some of N similar deployments, tenants, or sites, compare versions, configs, and dependencies across them BEFORE pursuing speculative hypotheses. The boring cause (outdated dependency with a public CVE, config drift, one feature flag toggled differently) frequently masquerades as a dramatic one. Test the boring hypothesis first.
