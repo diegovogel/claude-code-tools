@@ -136,6 +136,31 @@ Then in Designer:
 This applies equally to brand-new resource directories and to edits of existing
 files. Without a scan, neither case shows up. _Discovered: 2026-05-21_
 
+### Never run `git checkout` / `git stash` / branch switches under the project dir with Designer open
+**Symptom:** Designer refuses to save with `Failed to commit changes to view
+'<path>'`. The named view is often one you are not even editing, is clean on
+disk, and matches HEAD. Nothing appears in the gateway log — the failure is
+entirely Designer-side, so `system_logs.idb` is a dead end here.
+
+**Root cause:** the gateway treats the project directory as live state and
+watches it. A bulk git operation rewrites many resource files at once beneath
+it; the gateway re-scans and bumps resource signatures, and the open Designer
+session is left holding stale baselines. Its next commit is validated against a
+baseline that no longer exists and is rejected.
+
+This is distinct from the single-file disk-edit flow above, which is safe
+*because* it is followed by an explicit scan + Update Project. The problem is
+the uncoordinated bulk rewrite, not disk edits as such.
+
+**Fix:** close Designer → run the git command → reopen Designer. Reopening
+pulls fresh signatures from the gateway. If you must recover without closing,
+File → Update Project may resync, but a restart is the reliable move.
+
+Ordering matters when reverting a mistaken Designer edit: revert *in Designer*
+first, then close it, then clean up leftovers with git. Doing git first while
+Designer still holds the resource just recreates the desync.
+_Discovered: 2026-08-27_
+
 ### Opening a view in Designer marks it locally dirty even without edits
 Just opening a view (without typing or clicking anything inside it) puts it in
 Designer's "modified" state — the resource name turns italic and an asterisk
@@ -511,6 +536,59 @@ bound text fields and breaks query parameter substitution. Fix: either
 (a) set `persistent: true` (defaults survive), or (b) initialize the prop in
 a view-level / root-container `onStartup` event handler. _Discovered: 2026-05-21_
 
+### Persisted design-time defaults can hold REAL records — treat them as a live hazard, not diff noise
+**Symptom:** a view opened without one of its params behaves as though it was
+handed real data. In the case that surfaced this, two buttons opened a WO form
+passing an *undeclared* param name and no `dataset`; the form silently fell
+back to `params.dataset`'s persisted default, which was a complete real work
+order. Every user saw the same foreign record, and saving would have written
+to it.
+
+**Root cause:** Perspective persists the design-time value of params and props
+into `view.json`. Whatever was last loaded while the view sat open in Designer
+becomes the default. For a `dataset` param that means a full row of production
+data, committed to git and shipped.
+
+It compounds with transform code that guards the *empty* case but not the
+*stale* case. A common shape:
+
+```python
+data = value['dataset']
+dictData = transform.datasetToDict(data)   # returns {} when rowCount != 1
+```
+
+`datasetToDict` throws on `None` (so an `except → sensible defaults` fallback
+fires), but a 1-row stale default succeeds outright and a 0-row dataset returns
+`{}` without throwing — so the fallback never runs in either direction. Guard
+explicitly with `if not dictData:` rather than relying on the exception.
+
+**Also note:** an empty `{}` breaks **property** bindings into its sub-keys
+(the path does not resolve, and the component renders an ERROR band), while
+**expression** bindings wrapped in `isNull(...)` degrade to null quietly. A form
+whose labels all use `if(isNull({...}), '', {...})` is usually telling you its
+author already hit this.
+
+**Check for it** across a project before shipping:
+
+```bash
+python3 - <<'PY'
+import json,glob
+for f in glob.glob('**/view.json', recursive=True):
+    try: d=json.load(open(f))
+    except: continue
+    for p,v in (d.get('params') or {}).items():
+        if isinstance(v,dict) and '$columns' in v:
+            nn=sum(1 for c in v['$columns'] if any(x is not None for x in c.get('data',[])))
+            if nn: print('%s param=%s non-null cols=%d' % (f,p,nn))
+PY
+```
+
+Merely opening such a view in Designer re-persists it, which is why these show
+up as enormous unexplained diffs (19,555 lines in one case) with plant codes
+flipping to match whatever building the session was on. Clear the default (to
+null where possible, so the fallback path fires) rather than leaving live data
+in it. _Discovered: 2026-08-27_
+
 ---
 
 ## Named queries
@@ -545,6 +623,27 @@ for f in <project>/ignition/named-query/**/resource.json; do
 done
 ```
 _Discovered: 2026-08-20_
+
+### `scope` in a named query's resource.json is a resource-TYPE constant, not a per-query setting
+Do not send someone hunting for a scope checkbox in Designer — there isn't one.
+`scope` is written by the platform per resource type, and every named query in
+a project carries the same value. Verify rather than assume:
+
+```bash
+find <project>/ignition/named-query -name resource.json \
+  | while read f; do python3 -c "import json;print(json.load(open('$f')).get('scope'))"; done \
+  | sort | uniq -c
+```
+
+Observed values (Ignition 8.3): `named-query` = `DG` (Designer + Gateway),
+`script-python` = `A`, `startup` = `G`, `designer-properties` = `D`,
+`message`/`global-props` = `A`.
+
+Practical consequence: **named queries are gateway-runnable by default**, so a
+Gateway Event (scheduled/timer/tag-change) script can call one without any
+extra configuration. The things that actually need setting on a new named query
+are its **type** and its **Database Connection** (see the previous gotcha —
+that one is a real and silent trap). _Discovered: 2026-08-27_
 
 ### BLOB named-query params (sqlType 20) base64-decode STRING values — pass byte[], never str
 If a named-query parameter of Ignition type BLOB (sqlType 20) receives a

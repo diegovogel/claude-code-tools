@@ -24,7 +24,7 @@ Some tools require additional dependencies as noted in their details below.
 * [Ignition Designer](#skill-working-with-ignition-designer): a collection of tips and workflows that improve Claude's ability to build and debug [Ignition Perspective](https://inductiveautomation.com/ignition/modules/perspective) projects.
 * [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments.
 * [brainstorm-with-panel](#skill-brainstorm-with-panel): a phased, multi-agent workflow for generating and evaluating creative solutions to hard problems.
-* [security-review-plus](#skill-security-review-plus): runs a security review that includes a curated checklist of security tips.
+* [security-review-plus](#skill-security-review-plus): runs a security review that includes a curated checklist of security tips from the excellent [Securing Laravel](https://securinglaravel.com/) newsletter from [Stephen Rees-Carter](https://stephenreescarter.net/) (go sign up!).
 
 ### Other
 * [Diego's Engineering Guidelines](#document-diegos-engineering-guidelines): a set of engineering rules for Claude to follow, based on nine years of web dev.
@@ -170,7 +170,7 @@ The skill also self-improves: when Claude hits a new gotcha that meets the inclu
 
 [View source](skills/security-review-plus/SKILL.md)
 
-**Why it exists:** Claude Code has a built-in `/security-review` command, which is good but not exhaustive. I wanted to layer my own checklist of accumulated security tips on top and add framework-specific tools, without losing whatever upstream improvements the built-in command picks up over time.
+**Why it exists:** Claude Code has a built-in `/security-review` command, which is good but not exhaustive. I wanted to layer a checklist of security tips on top and add framework-specific tools, without losing whatever upstream improvements the built-in command picks up over time.
 
 **What it does:** runs three passes and emits one unified report. Pass A runs the built-in `/security-review` via a subagent (so we always pick up the latest version of it). Pass B walks the skill's bundled tips file ([security-tips.md](skills/security-review-plus/security-tips.md), distilled from public [Securing Laravel](https://securinglaravel.com/) articles) entry-by-entry, applying each tip's detection heuristic to the current branch's diff. Pass C runs Laravel Checkpoint if requirements are met (Laravel and minimum requirements).
 
