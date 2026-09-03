@@ -56,16 +56,25 @@ Spawn the Claude generators with the `Agent` tool (general-purpose), all in one 
 
 **Codex generator** (cross-model decorrelation; GPT has different priors). Run read-only (no `--write`):
 
+Write the prompt to a file first and pass it with `--prompt-file`. Never inline the
+brief on the command line: `task "$(cat brief.md) ..."` puts a multi-kilobyte
+document inside double quotes, where every backtick, `$` and `"` in it is shell
+syntax, and the runtime's Bash vetting refuses command substitution outright in
+a bound worktree session. The file form has none of those problems.
+
 ```bash
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.local/bin:$PATH"
-node "$(ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | head -1)" task "$(cat <PATH>/brief.md)
+{ cat <PATH>/brief.md; cat <<'EOF'
 
 You are a pure idea generator. Read the brief above. Produce 4-6 genuinely different approaches to this problem. Be divergent: unconventional, even impractical ideas are welcome. Do NOT evaluate, rank, or recommend any of them. Do NOT edit or run anything. For each idea output exactly this schema:
 - id: <short-slug>
 - one-liner: <one sentence>
 - sketch: <2-4 sentences on how it would work>
 - assumes: <what must be true for it to work>
-- would-break: <what it sacrifices or risks> (describe, do not judge)"
+- would-break: <what it sacrifices or risks> (describe, do not judge)
+EOF
+} > <PATH>/codex-generator-prompt.md
+node "$(ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | head -1)" task --prompt-file <PATH>/codex-generator-prompt.md
 ```
 
 If `which codex` fails (Codex not installed), skip the Codex generator, tell the user you're degrading to Claude-only decorrelated generation, and add one extra Claude lens to partly compensate.
@@ -95,12 +104,12 @@ Now, and only now, evaluate. The rule that makes this real: **an idea should be 
 1. **Codex evaluation pass** (read-only). Feed it `brief.md` + the full `ideas.md` pool:
 
 ```bash
-node "$(ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | head -1)" task "$(cat <PATH>/brief.md)
+{ cat <PATH>/brief.md; printf '\n--- IDEAS ---\n'; cat <PATH>/ideas.md; cat <<'EOF'
 
---- IDEAS ---
-$(cat <PATH>/ideas.md)
-
-You are an evaluator. For each idea above, score it on: novelty (is it genuinely different from the current solution, or a rephrase?), feasibility (in the stated constraints), and payoff (if it works). Where feasibility depends on the actual codebase, READ the relevant files to verify before scoring (do not guess). Give each a one-line biggest-risk / what-would-kill-it. Then nominate the 2-3 most worth pursuing and say why. If none of them beat the current solution, say so plainly — do not manufacture a winner. Do NOT edit or run anything."
+You are an evaluator. For each idea above, score it on: novelty (is it genuinely different from the current solution, or a rephrase?), feasibility (in the stated constraints), and payoff (if it works). Where feasibility depends on the actual codebase, READ the relevant files to verify before scoring (do not guess). Give each a one-line biggest-risk / what-would-kill-it. Then nominate the 2-3 most worth pursuing and say why. If none of them beat the current solution, say so plainly — do not manufacture a winner. Do NOT edit or run anything.
+EOF
+} > <PATH>/codex-evaluator-prompt.md
+node "$(ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | head -1)" task --prompt-file <PATH>/codex-evaluator-prompt.md
 ```
 
 Codex's `task` reads from its current working directory, so run the Codex evaluation **from the relevant repo root** (or pass key file paths in the prompt) so it can actually read the code, not just the brief. The Claude evaluator can be pointed at absolute paths directly.
