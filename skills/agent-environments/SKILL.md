@@ -618,3 +618,7 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
 - [`references/wordpress.md`](references/wordpress.md): the WordPress model and its
   hard-won gotchas (`wp server` workers, browser-sync, `--skip-plugins`, URL /
   search-replace, per-env DB).
+- [`references/history-wordpress-worktree-redesign.md`](references/history-wordpress-worktree-redesign.md):
+  why the WordPress flow moves sessions instead of binding them, why clones were
+  rejected, and the runtime facts the field tests established. History, not
+  rules; read it before reopening any of those questions.
