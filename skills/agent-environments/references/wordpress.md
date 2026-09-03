@@ -7,8 +7,27 @@ gets its own script, [`assets/agent-env-wp.sh`](../assets/agent-env-wp.sh), whic
 reuses the engine's primitives (slot/port registry, the `unique_commits` destroy
 guard, pid/health machinery, CoW clone) but with a WP-specific flow.
 
-Use it the same way you'd be anchored: **run it from inside the theme/plugin
-repo**; it finds the enclosing WP install automatically.
+**Run it from the theme/plugin repo's main checkout**; it finds the enclosing WP
+install automatically. `destroy` refuses to run from inside the env it would delete.
+
+## Lifecycle
+
+Run from the theme/plugin repo's main checkout (projects usually wrap the
+common ones; check the CLAUDE.md):
+
+| Command | What it does |
+|---|---|
+| `scripts/agent-env-wp.sh create <name> [base-ref]` | CoW-clone the install, worktree(s) on `worktree-<name>`, per-env DB, URL, deps, build step |
+| `scripts/agent-env-wp.sh run <name> -- <cmd>` | Run a command in the env's own worktree, whatever the shell's cwd (the re-anchor fix) |
+| `scripts/agent-env-wp.sh serve <name>` | `wp server` on the env's port, background, health-checked |
+| `scripts/agent-env-wp.sh stop <name>` | Stop that server |
+| `scripts/agent-env-wp.sh list` | Every env of this repo: branch, port, DB, serving; plus the main checkout's branch and dirty state |
+| `scripts/agent-env-wp.sh destroy <name> [--force]` | Guarded teardown of every worktree, the DB, the clone and the slot; refuses from inside the env |
+| `scripts/agent-env-wp.sh install-hooks` | (Re)install the dependency-sync git hooks; `create` does this itself |
+| `scripts/agent-env-wp.sh sync-deps` | What those git hooks call after a pull changed a lockfile |
+
+`run` and `serve` refuse an env whose `create` did not finish (its wp-config may
+still name the source database); `destroy` and `list` accept it.
 
 ## The model
 
@@ -17,14 +36,17 @@ An env is:
   uploads), placed outside Herd's parked dirs (`~/WebDev/Sites/.wp-agent-envs/`
   by default) so it isn't auto-served as a `.test` domain;
 - with the **target theme/plugin replaced by a git worktree** of your repo (on
-  branch `worktree-<name>`), nested at its normal `wp-content/...` path;
+  branch `worktree-<name>`), nested at its normal `wp-content/...` path, and the
+  same for every repo in `SIBLING_REPOS` (see
+  [Sibling repos](#sibling-repos-theme--plugin-in-one-env));
 - its **own database** (`wp_<site>_<env>`, copied from the site), and
-- its **own port**, served with `wp server`.
+- its **own port**, served with `wp server`, from a slot pool shared by every
+  env under `ENV_PARENT` on the machine.
 
 ```
-create  -> CoW-clone install -> swap target dir for a git worktree -> copy DB -> set URL -> deps
+create  -> CoW-clone install -> swap target dir (and each sibling) for a git worktree -> copy DB -> set URL -> deps + build step per worktree
 serve   -> wp server (PHP_CLI_SERVER_WORKERS) on the env's port
-destroy -> drop DB, remove worktree, rm the clone, delete branch if no unique commits
+destroy -> refuse if run from inside; drop DB, remove every worktree, rm the clone, delete each branch if no unique commits
 ```
 
 CoW makes the clone cheap despite size (a 2 GB install clones in ~13-17s, file-count
@@ -116,78 +138,91 @@ names (`build`/`bundle`/`compile:css`/...) and usually commit built assets. PHP
 
 **If the repo gitignores its compiled assets** (e.g. compiled CSS at the theme
 root), a fresh worktree has none and the env renders unstyled — and any e2e spec
-that loads a compiled file from disk fails. Add a one-shot compile to the create
-flow's per-project section (tab-handbook does `node_modules/.bin/sass scss:.`
-after npm deps).
+that loads a compiled file from disk fails. Put the one-shot compile in the
+per-project `project_after_worktree`, which runs with cwd = the worktree once
+its deps are in place, once for the target repo and once per sibling; dispatch
+on the install-relative path when they differ (tab-handbook's theme runs
+`node_modules/.bin/sass scss:.`, its plugin `sass scss/style.scss:dist/style.css`).
+Use `node_modules/.bin/<tool>` there, and also when you run a compile by hand in
+Bash: a package-install gate hook denies any Bash call whose command line
+contains `npx`, even `npx --no-install` (the hook reads the command line, not
+the script body, so inside the script it is a matter of consistency).
 
-## Operating while anchored in the worktree (`EnterWorktree`)
+## Working inside an env: move the session, never bind it
 
-The pre-PR workflow anchors the session in the env's theme/plugin worktree.
-Because that path is outside `.claude/worktrees/`, adoption always asks for
-approval once (runtime design, no allow rule suppresses it), and the session
-then runs under the runtime's worktree isolation until `ExitWorktree`: Bash is
-statically vetted to stay inside the worktree (SKILL.md, "What `EnterWorktree`
-switches on"). In WP terms:
+The pre-PR workflow and most implementation work want the session's cwd inside
+the env's theme/plugin worktree. Move it there with the desktop app's
+`mcp__ccd_directory__change_directory` (effective when the turn ends; the app
+asks once per move and no permission rule suppresses that, so budget two
+prompts per env: in, and back out). Do **not** `EnterWorktree` into a WordPress
+env, and a hook (`assets/agent-env-enter-worktree-gate.cjs`) refuses it:
+binding switches on the runtime's worktree isolation, which refuses the
+command shapes ordinary work needs (any `git -C` at a main checkout, command
+substitution, `$VAR` in a chained command, heredocs with braces, chained git;
+the lifecycle script itself still runs), and it survives compaction and app
+restarts while leaving no trace in the session's context (SKILL.md, "What
+`EnterWorktree` switches on"). If a bound session is
+ever wanted, `AGENT_ENV_ALLOW_ENTERWORKTREE=1` in the settings `env` block turns
+the gate off, and `ExitWorktree` (action `keep`) becomes the first wrap-up step.
 
-- **Plain `wp <command>` from the worktree just works.** WP-CLI walks up from
-  the cwd to the env's `wp-config.php`, so an anchored session needs no
-  `--path` and no `cd` for `wp option get/update`, `wp db query`,
-  `wp cache flush`, `wp plugin list`, and so on. Single plain commands with
-  literal arguments pass the vetting; that one habit covers most day-to-day
-  operations.
-- **The lifecycle script keeps working.** `scripts/agent-env-wp.sh
-  serve/stop/list <name>` is a plain invocation of a file inside the worktree
-  (the vetting reads the command line; the script does its own env-root work).
-  `destroy` is the exception: run it only after `ExitWorktree`, never from
-  inside the worktree it removes.
-- **Anything containing `eval` is refused**, including WP-CLI's `wp eval` and
-  `wp eval-file` (pattern-matched as shell eval, no override). Replacement for
-  arbitrary PHP from an anchored session: write the code to a file in the
-  worktree whose first line `require`s the env's `wp-load.php`, then run
-  `php <file>`. That boots the env's WordPress the classic way with no eval
-  token on the command line (same boot as the site; only `WP_CLI`-specific
-  helpers are absent). Or do the PHP-heavy work before anchoring / after
-  `ExitWorktree`.
-- **No `cd "$ENVROOT" && ...` compounds.** The vetting cannot trace a variable
-  working directory. Stay in the worktree and pass literal absolute paths as
-  arguments when a tool must be pointed at the install root
-  (`mysql -h 127.0.0.1 <db>` needs no cwd at all).
-- **Git is confined to this worktree.** `git -C` at the source checkout, the
-  sibling-worktree add/prune below, and cross-worktree stash recovery are all
-  refused while anchored; do them from a non-anchored session.
+An unbound session inside an env is ordinary: plain `wp <command>` works from
+the worktree (WP-CLI walks up to the env's `wp-config.php`), heredocs, chained
+commands and command substitution all pass, and `git -C` reaches every repo.
+What keeps that from touching the main checkouts is four user-level hooks in
+`~/.claude/settings.json`, all keyed on the on-disk layout (the env's
+`<site>__<name>` install and the worktrees' gitdir pointers), never on the
+session's launch directory, because the desktop app relaunches a resumed
+session in whatever directory it was moved to:
 
-Sequencing rule of thumb: `create`, provisioning checks, DB surgery, and
-config verification before anchoring; anchor for implementation and the
-pre-PR steps (all in-worktree); `ExitWorktree` for teardown or unrestricted
-env-root work.
+- `PreToolUse` Bash → `assets/agent-env-main-guard.cjs`: refuses `cd`,
+  mutating `git -C`, `rm`, `cp`/`mv` and redirects aimed at any main checkout
+  of the site, and `destroy` of the env the shell stands in. Read-only git and
+  the lifecycle script's other commands pass.
+- `PreToolUse` Edit|Write → `assets/worktree-edit-guard.cjs`: refuses file
+  edits to the worktree's main checkout.
+- `PreToolUse` EnterWorktree → `assets/agent-env-enter-worktree-gate.cjs`.
+- `SessionStart`, every source (no matcher) → `assets/agent-env-session-context.sh`:
+  re-states the env, every main checkout, which one created it, and the
+  teardown rule, so the facts survive a compaction, a `/clear` or a restart.
 
-## Sibling-repo work in one env (theme + plugin)
+Teardown runs from the main checkout that created the env: move the session
+back with `change_directory`, then `scripts/agent-env-wp.sh destroy <name>`.
+Both the script and the guard refuse a destroy from inside the env (the
+`rm -rf` would take the shell's working directory with it). An env's own
+`scripts/` copy is whatever its branch last committed, so commit the script
+after changing it, or an env created afterwards still carries the old copy.
 
-A feature that spans both custom repos (e.g. tab-handbook's theme + plugin) can use
-one env: the engine manages the **target** repo's worktree, and you hand-create a
-second worktree for the sibling inside the clone at its normal path
-(`git -C <main-sibling-checkout> worktree add <env>/wp-content/plugins/<plugin> -b <branch>`).
-The env then serves both branches together. Two consequences the engine does NOT
-handle:
+## Sibling repos: theme + plugin in one env
 
-- **`destroy` only reclaims its own repo's side.** It deletes the clone directory
-  (taking the sibling worktree's files with it) but knows nothing about the sibling
-  repo's git state, which is left with a dangling "prunable" worktree registration
-  and the feature branch. Finish teardown from the sibling's MAIN checkout:
-  `git worktree prune`, then `git branch -d <branch>`.
-- **Stop anything running FROM the sibling worktree before `destroy`.** In
-  particular a plugin's wp-env (`node_modules/.bin/wp-env stop`): Docker holds
-  mounts of the path `destroy` is about to delete.
+A feature that spans both custom repos uses one env. Each repo's copy of the
+script lists the other in `SIBLING_REPOS` (install-relative, e.g.
+`wp-content/plugins/tab-handbook-plugin`), and `create` then swaps that repo's
+CoW snapshot for a worktree of its main checkout on the same `worktree-<name>`
+branch, from whatever that checkout has checked out (announced, with a warning
+if it is dirty), installs its deps the same way and runs
+`project_after_worktree` for it. `destroy` applies the dirty/unpushed guard to
+every sibling before touching anything, removes every worktree, and deletes each
+branch only when it carries no unique commits. Work done in a sibling worktree
+lands on that repo's `worktree-<name>` branch: push it and open its PR from there.
 
-Both sibling operations are git commands targeting another repo, so run them
-from a session that is not anchored via `EnterWorktree` (isolation confines
-git to the anchored worktree; see the section above).
+The list is explicit on purpose: vendored plugins carry `.git` directories too,
+so detection would branch third-party code. Everything not listed stays a CoW
+snapshot, and a sibling commit that lands on `main` after `create` is not in the
+env until you merge `main` into the env's branch of that repo.
+
+**Stop anything running FROM a sibling worktree before `destroy`**, in
+particular a plugin's wp-env (`node_modules/.bin/wp-env stop`): Docker holds
+mounts of the path `destroy` is about to delete.
 
 ## Other notes
 
-- **Run from the repo**; the script walks up to `wp-config.php` to find the install
-  and computes the repo's `wp-content/...` path. It also defaults the worktree base
-  to the repo's current branch (WP repos are often on a feature branch, not `main`).
+- **Run from the repo's main checkout**; the script walks up to `wp-config.php` to
+  find the install and computes the repo's `wp-content/...` path. It also defaults
+  the worktree base to the repo's current branch (WP repos are often on a feature
+  branch, not `main`).
+- **Ports come from one pool per `ENV_PARENT`** (`<ENV_PARENT>/.wp-slots/`): a slot
+  is taken when the registry says so or an existing env's `wp-config.php` declares
+  its port, so repos that share an `ENV_PARENT` need no `PORT_BASE` coordination.
 - **Env clones live outside Herd-parked paths** (CONFIG `ENV_PARENT`) so Herd
   doesn't try to serve them; we serve via `wp server`.
 - One port per env by default; if a repo genuinely uses a port-bound dev server you

@@ -20,8 +20,10 @@ queue worker." >
   `EnterWorktree` with `path: .claude/worktrees/<name>` (built with
   `./scripts/agent-env.sh create <name>`). Entering turns on the runtime's
   worktree isolation until `ExitWorktree`: Bash is statically vetted to stay in
-  the worktree (single plain commands; no heredocs with unquoted delimiters, no
-  `eval` tokens, git confined to the worktree).
+  the worktree (single plain commands with literal arguments; git confined to
+  the worktree; command substitution, `$VAR` in a chained command and
+  brace-bearing heredocs are refused). The binding survives compaction and an
+  app restart, so `ExitWorktree` (action `keep`) is the first wrap-up step.
 - **Ports**: slot N → `<PORT_BASE + STRIDE*N>` (slot 1 = `<13002/13003>`). Each
   env takes the lowest free slot; `destroy` frees it for reuse.
 - **Inside an env, NEVER run `<MAIN_DEV_CMD, e.g. npm run dev>`**: it is pinned
@@ -62,8 +64,10 @@ queue worker." >
   the project has none. >
 - **Cleanup**: after merge, `<npm run destroy <name>>`. It refuses to remove
   anything dirty or unpushed (commits survive in the main repo's `.git`
-  regardless). Merged branches are deleted automatically so the name can be
-  recreated; unmerged branches are kept (`create <name> --resume` reattaches one).
+  regardless). A branch whose commits all exist elsewhere (another branch or a
+  remote) is deleted so the name can be recreated; one still carrying commits
+  found nowhere else needs `--force` and is kept (`create <name> --resume`
+  reattaches one).
 - **Dependencies auto-reconcile after a pull.** A committed git hook (`.githooks/`,
   installed by the env system) runs `<SYNC_CMD, e.g. npm install>` whenever a
   merge/pull/rebase changes `<LOCKFILES, e.g. package-lock.json>`, so the checkout

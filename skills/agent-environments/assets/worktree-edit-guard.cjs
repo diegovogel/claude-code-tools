@@ -36,10 +36,12 @@
  * -----
  * - Active ONLY when cwd is inside a linked worktree. Main-checkout sessions
  *   exit immediately (the `.git` directory check), so they are unaffected.
- * - Blocks edits to the main checkout's working tree. Edits to the worktree
- *   itself, to anything under <main>/.claude/, and to anything outside the main
- *   checkout (including the rest of a WordPress install around the worktree) are
- *   allowed.
+ * - Blocks edits to the main checkout's working tree, and, when the worktree
+ *   sits inside a WordPress agent env (a <site>__<name> install), to every
+ *   other repo's main checkout in the install the main checkout belongs to.
+ *   Edits to the worktree itself, to anything under <main>/.claude/, and to
+ *   anything outside those checkouts (including the rest of a WordPress
+ *   install around the worktree) are allowed.
  *
  * Fails OPEN: any malformed input or unexpected error exits 0 (allow). It only
  * ever emits a blocking exit 2 for a confirmed main-checkout edit from a
@@ -63,6 +65,18 @@ function findGitEntry(startDir) {
     } catch {
       // Not here (or unreadable) — keep walking up.
     }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// Nearest ancestor holding wp-config.php; with envOnly, only one named
+// <site>__<name> (a WordPress agent env) counts.
+function findWpInstall(start, envOnly) {
+  let dir = path.resolve(start);
+  for (;;) {
+    if ((!envOnly || path.basename(dir).includes("__")) && fs.existsSync(path.join(dir, "wp-config.php"))) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -115,15 +129,33 @@ try {
 
   const abs = path.resolve(cwd, fp);
 
-  const underMain = abs === mainRoot || abs.startsWith(mainRoot + path.sep);
+  // In a WordPress env (a <site>__<name> install) a sibling repo's main checkout
+  // is as wrong a target as this repo's own, and nothing else covers Edit/Write
+  // there, so every repo in the main install this checkout sits in counts.
+  const mains = [mainRoot];
+  const envInstall = findWpInstall(worktreeRoot, true);
+  const mainInstall = envInstall ? findWpInstall(mainRoot, false) : null;
+  if (mainInstall && mainInstall !== envInstall) {
+    for (const kind of ["themes", "plugins"]) {
+      let entries = [];
+      try { entries = fs.readdirSync(path.join(mainInstall, "wp-content", kind)); } catch { continue; }
+      for (const e of entries) {
+        const repo = path.join(mainInstall, "wp-content", kind, e);
+        try { if (fs.statSync(path.join(repo, ".git")).isDirectory() && !mains.includes(repo)) mains.push(repo); } catch {}
+      }
+    }
+  }
+  const hitMain = mains.find((m) => abs === m || abs.startsWith(m + path.sep));
   const underWorktree = abs === worktreeRoot || abs.startsWith(worktreeRoot + path.sep);
-  const underClaude = abs.startsWith(mainRoot + path.sep + ".claude" + path.sep);
-  // Allow: outside the main checkout entirely (including the surrounding
+  const underClaude = hitMain && abs.startsWith(hitMain + path.sep + ".claude" + path.sep);
+  // Allow: outside every main checkout (including the rest of the surrounding
   // WordPress install), the worktree itself (which the generic engine nests
   // inside the main checkout), and <main>/.claude/ tooling and settings.
-  if (!underMain || underWorktree || underClaude) process.exit(0);
+  if (!hitMain || underWorktree || underClaude) process.exit(0);
 
-  const suggested = path.join(worktreeRoot, path.relative(mainRoot, abs));
+  const suggested = hitMain === mainRoot
+    ? path.join(worktreeRoot, path.relative(mainRoot, abs))
+    : path.join(envInstall, path.relative(mainInstall, abs));
 
   process.stderr.write(
     `Blocked by worktree-edit-guard: this ${data.tool_name} targets the MAIN ` +

@@ -9,16 +9,17 @@
 # entire WP install, with the target theme/plugin swapped for a git worktree of
 # your repo (on the env branch), its own database, and its own port (wp server).
 #
-# Run this from inside the theme/plugin repo (the same place your session is
-# anchored). It finds the enclosing WP install automatically.
+# Run this from the theme/plugin repo's MAIN checkout. It finds the enclosing WP
+# install automatically. Sibling repos listed in SIBLING_REPOS get a worktree of
+# their own in every env, on the same branch name, and are reclaimed by destroy.
 #
 # Usage:
-#   agent-env-wp.sh create <name> [base-ref]   # clone install + worktree + DB + config
+#   agent-env-wp.sh create <name> [base-ref]   # clone install + worktree(s) + DB + config
 #   agent-env-wp.sh run <name> -- <cmd...>     # run a command IN the env's worktree, cwd-independent
 #   agent-env-wp.sh serve <name>               # wp server (+ asset watcher) on the env's port
 #   agent-env-wp.sh stop <name>
 #   agent-env-wp.sh list
-#   agent-env-wp.sh destroy <name> [--force]   # drop DB, remove clone, delete branch if no unique commits
+#   agent-env-wp.sh destroy <name> [--force]   # drop DB, remove clone + worktrees, delete branches if no unique commits; refuses to run from inside the env
 #   agent-env-wp.sh install-hooks              # install git hooks that reconcile theme/plugin deps after a pull (auto-run by create)
 #   agent-env-wp.sh sync-deps                  # reconcile deps if a pull changed a lockfile (called by the git hooks)
 #
@@ -69,6 +70,23 @@ URL_MODE="search-replace"
 # Lockfiles whose change in a pull triggers project_sync_deps (space-separated,
 # repo-root-relative). WP theme/plugin repos commonly carry both.
 LOCKFILES="composer.lock package-lock.json"
+# Other custom repos in this install that every env should branch alongside this
+# one (space-separated, install-relative, e.g. "wp-content/plugins/my-plugin").
+# The canonical case is a custom theme plus a custom plugin: each repo's copy of
+# this script lists the OTHER. create gives each sibling a worktree on the same
+# `worktree-<name>` branch, from that checkout's current branch; destroy reclaims
+# it under the same dirty/unpushed guard. Everything not listed stays a CoW
+# snapshot, which is right for third-party code. The list is explicit on purpose:
+# vendored plugins carry .git directories too, so detection would branch those.
+SIBLING_REPOS=""
+
+# Build step for a fresh worktree, run with cwd = that worktree once its
+# dependencies are in place: once for this repo, once per sibling. Compiled
+# assets are usually gitignored, so a fresh worktree has none and the site
+# renders unstyled. Dispatch on the install-relative path when siblings differ.
+project_after_worktree() { # <install-relative path>
+  return 0
+}
 
 # Reconcile the theme/plugin repo's dependencies after a pull changed a lockfile.
 # Run by the post-merge/post-rewrite git hooks (installed by `install-hooks`) so
@@ -160,16 +178,32 @@ wp_root() {  # walk up from $1 until a dir holds wp-config.php
 # .agent-env/wp/<name>/, alongside the repo, gitignored via .git/info/exclude.
 env_dir() { echo "$(repo_root "$PWD")/.agent-env/wp/$1"; }
 
-allocate_slot() { # repo name
-  local repo="$1" name="$2" slots="$1/.agent-env/wp-slots" lock used slot tries=0
+# Slots live under ENV_PARENT, not under the repo, because ports are machine-wide:
+# every repo whose script points at the same ENV_PARENT draws from one pool, so a
+# theme env and a plugin env of the same site (or of two sites) never share a
+# port without anyone coordinating PORT_BASE bands by hand. A slot is taken when
+# the registry says so OR an existing env under ENV_PARENT already declares its
+# port in wp-config.php. The second source is the ground truth: it covers envs
+# made by earlier versions of this script (which kept slots under the repo) and
+# a registry entry that went missing, both of which handed out a live port once.
+allocate_slot() { # site name
+  local key="${1}__${2}" slots="$ENV_PARENT/.wp-slots" lock used slot tries=0 cfg port
   mkdir -p "$slots"; lock="$slots/.lock"
   until mkdir "$lock" 2>/dev/null; do (( ++tries < 50 )) || die "slot lock stuck ($lock)"; sleep 0.1; done
-  if [[ -f "$slots/$name" ]]; then slot=$(cat "$slots/$name"); else
-    used=$(cat "$slots"/* 2>/dev/null || true); slot=1
+  if [[ -f "$slots/$key" ]]; then slot=$(cat "$slots/$key"); else
+    used=$(cat "$slots"/* 2>/dev/null || true)
+    for cfg in "$ENV_PARENT"/*/wp-config.php; do
+      port=$(sed -n "s/.*'WP_HOME', *'http:\/\/[^:']*:\([0-9]*\)'.*/\1/p" "$cfg" 2>/dev/null | head -1)
+      [[ -n "$port" ]] && used+=$'\n'$(( (port - PORT_BASE) / PORT_STRIDE ))
+    done
+    slot=1
     while grep -qx "$slot" <<<"$used"; do slot=$((slot+1)); done
-    echo "$slot" >"$slots/$name"
+    echo "$slot" >"$slots/$key"
   fi
   rmdir "$lock" 2>/dev/null || true; echo "$slot"
+}
+free_slot() { # repo site name
+  rm -f "$ENV_PARENT/.wp-slots/${2}__${3}" "$1/.agent-env/wp-slots/$3"
 }
 
 exclude_artifacts() { # repo
@@ -268,15 +302,70 @@ cmd_sync_deps() {
 # run and release here from the EXIT trap, on every path (success, die,
 # interrupt). Guarded because the trap can fire before any lock was taken.
 AGENT_ENV_LOCK=""
-env_lock_path() { echo "$1/.agent-env/.lock-$(sanitize "$2")"; }
-take_env_lock() { # repo name verb
+# Keyed by site and name under ENV_PARENT, like the slot pool: the install path,
+# database and slot are per site, so a theme `create foo` and a plugin `create
+# foo` must exclude each other, which a per-repo lock cannot do.
+env_lock_path() { echo "$ENV_PARENT/.locks/$(sanitize "${1}__${2}")"; }
+take_env_lock() { # site name verb
   AGENT_ENV_LOCK=$(env_lock_path "$1" "$2")
-  mkdir -p "$1/.agent-env"
+  mkdir -p "$ENV_PARENT/.locks"
   mkdir "$AGENT_ENV_LOCK" 2>/dev/null \
     || { AGENT_ENV_LOCK=""; die "another lifecycle operation for '$2' is already running, so $3 would race it (if that process died, remove $(env_lock_path "$1" "$2"))"; }
   trap release_env_lock EXIT
 }
 release_env_lock() { [[ -n "${AGENT_ENV_LOCK:-}" ]] && rm -rf "$AGENT_ENV_LOCK"; return 0; }
+
+# Dependencies a worktree needs (PHP vendor for autoload at runtime; npm for its
+# asset watcher): CoW-clone from its main checkout when present (instant), else
+# install; then the per-project build step. No generic front-end "build": WP
+# repos vary in script names and usually commit built assets, which is what
+# project_after_worktree is for.
+provision_worktree_deps() { # main-checkout worktree-path rel
+  local main="$1" rp="$2" rel="$3"
+  if [[ -f "$rp/composer.json" ]]; then
+    say "composer deps for $rel"
+    { [[ -d "$main/vendor" && ! -d "$rp/vendor" ]] && clone_dir "$main/vendor" "$rp/vendor"; } || true
+    # Always reconcile to the lockfile (no-op when complete): a bare "dir exists"
+    # check is fooled by a failed/partial clone or a repo that tracks a partial
+    # vendor subset (some starters committed the phpcs toolchain pre-gitignore).
+    ( cd "$rp" && composer install --no-interaction --no-progress ) \
+      || warn "composer install failed for $rel (theme/plugin may not load)"
+  fi
+  if [[ -f "$rp/package.json" ]]; then
+    if [[ ! -d "$rp/node_modules" ]]; then
+      say "npm deps for $rel"
+      { [[ -d "$main/node_modules" ]] && clone_dir "$main/node_modules" "$rp/node_modules"; } \
+        || ( cd "$rp" && npm ci --no-audit --no-fund ) \
+        || warn "npm install failed for $rel (asset watcher may not run)"
+    fi
+    # A cloned node_modules mirrors the SOURCE checkout, which may sit on a
+    # different lockfile than the env branch — the env would then run on packages
+    # that do not match its own code. Reconcile only when the lockfiles actually
+    # differ, so the common case keeps the instant CoW path (this is the npm
+    # half of the reconcile the composer branch above always does).
+    if [[ -f "$rp/package-lock.json" ]] && ! cmp -s "$main/package-lock.json" "$rp/package-lock.json"; then
+      say "lockfile differs from the source checkout; reconciling npm deps for $rel"
+      ( cd "$rp" && npm ci --no-audit --no-fund ) \
+        || warn "npm ci failed for $rel (dependencies may not match the env branch)"
+    fi
+  fi
+  ( cd "$rp" && project_after_worktree "$rel" ) \
+    || warn "project_after_worktree failed for $rel (compiled assets may be missing)"
+}
+
+# A sibling repo's CoW snapshot becomes a worktree of its main checkout on the
+# env branch, from whatever that checkout has checked out (announced, like the
+# target repo's default base).
+add_sibling_worktree() { # main-checkout worktree-path branch rel
+  local main="$1" wt="$2" branch="$3" rel="$4" sbase
+  sbase=$(git -C "$main" rev-parse --abbrev-ref HEAD)
+  say "sibling $rel: worktree on $branch from its checkout's current branch '$sbase'"
+  [[ -z "$(git -C "$main" status --porcelain 2>/dev/null)" ]] \
+    || warn "that checkout has uncommitted changes; the env branches from its last COMMIT"
+  rm -rf "${wt:?}"
+  git -C "$main" worktree add "$wt" -b "$branch" "$sbase" --quiet
+  provision_worktree_deps "$main" "$wt" "$rel"
+}
 
 # ---------------------------------------------------------------------------
 cmd_create() {
@@ -315,16 +404,34 @@ cmd_create() {
   # read-then-write test: two concurrent `create foo` calls both pass it and then
   # share one slot, install path, branch and database, clobbering each other.
   # mkdir is the atomic gate; the trap releases it on success, failure or die.
-  take_env_lock "$repo" "$name" "creating it"
+  take_env_lock "$site" "$name" "creating it"
 
   [[ ! -e "$install" ]] || die "$install already exists (destroy it first)"
 
+  # A registration left by a destroy that ran through an env's older in-tree
+  # script copy would make git refuse to delete the leftover branch below.
+  git -C "$repo" worktree prune 2>/dev/null || true
   # Reuse a leftover branch only if it carries no unique work.
   if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
     local u; u=$(unique_commits "$repo" "$branch")
     [[ "$u" == "0" ]] && git -C "$repo" branch -D "$branch" >/dev/null \
       || die "branch $branch exists with $u unique commit(s); delete it or pick another name"
   fi
+  # Siblings get the same branch name in their own repo, so the same reuse rule
+  # applies there, checked now so a refusal costs nothing.
+  local siblings="" s srepo su
+  for s in $SIBLING_REPOS; do
+    srepo="$wproot/$s"
+    [[ "$s" != "$rel" ]] || die "SIBLING_REPOS lists this repo itself ($rel)"
+    [[ -e "$srepo/.git" ]] || die "SIBLING_REPOS entry '$s' is not a git checkout at $srepo"
+    git -C "$srepo" worktree prune 2>/dev/null || true
+    if git -C "$srepo" show-ref --verify --quiet "refs/heads/$branch"; then
+      su=$(unique_commits "$srepo" "$branch")
+      [[ "$su" == "0" ]] && git -C "$srepo" branch -D "$branch" >/dev/null \
+        || die "branch $branch exists in sibling $s with $su unique commit(s); delete it or pick another name"
+    fi
+    siblings="${siblings:+$siblings }$s"
+  done
 
   db="wp_$(sanitize "${site}_${name}")"
   # sanitize() maps every non-alphanumeric to '_', so two names that differ only
@@ -341,8 +448,8 @@ cmd_create() {
   # "no owner yet" as stale would sail straight through the window the claim
   # exists to close. Only the claim's own env may proceed, which is what lets a
   # failed create be retried under the same name.
-  local claim="$repo/.agent-env/db-claims/$db" owner="" claim_fresh=1
-  mkdir -p "$repo/.agent-env/db-claims"
+  local claim="$ENV_PARENT/.db-claims/$db" owner="" claim_fresh=1
+  mkdir -p "$ENV_PARENT/.db-claims"
   if ! mkdir "$claim" 2>/dev/null; then
     claim_fresh=0
     owner=$(cat "$claim/owner" 2>/dev/null || true)
@@ -361,7 +468,7 @@ cmd_create() {
     die "database $db already exists but no env claims it; drop it yourself or pick another name"
   fi
 
-  slot=$(allocate_slot "$repo" "$name")
+  slot=$(allocate_slot "$site" "$name")
   (( PORT_STRIDE >= PORTS_PER_ENV )) || die "PORT_STRIDE ($PORT_STRIDE) must be >= PORTS_PER_ENV ($PORTS_PER_ENV); adjacent slots would overlap"
   web_port=$((PORT_BASE + PORT_STRIDE * slot))
   asset_port=$((web_port + 1))
@@ -383,6 +490,7 @@ AGENT_ENV_BRANCH=$branch
 AGENT_ENV_DB=$db
 AGENT_ENV_WEB_PORT=$web_port
 AGENT_ENV_ASSET_PORT=$asset_port
+AGENT_ENV_SIBLINGS="$siblings"
 EOF
 
   say "cloning WP install (CoW): $wproot -> $install"
@@ -430,39 +538,10 @@ EOF
     fi
   fi
 
-  # Dependencies the theme/plugin needs (PHP vendor for autoload at runtime; npm
-  # for its asset watcher). CoW-clone from the source repo when present (instant),
-  # else install. We do NOT run a front-end "build": WP themes vary in script
-  # names (build/bundle/compile/...) and usually commit built assets, and `serve`
-  # runs the project's own watcher for ongoing changes.
-  local rp="$install/$rel"
-  if [[ -f "$rp/composer.json" ]]; then
-    say "composer deps for $rel"
-    { [[ -d "$repo/vendor" && ! -d "$rp/vendor" ]] && clone_dir "$repo/vendor" "$rp/vendor"; } || true
-    # Always reconcile to the lockfile (no-op when complete): a bare "dir exists"
-    # check is fooled by a failed/partial clone or a repo that tracks a partial
-    # vendor subset (some starters committed the phpcs toolchain pre-gitignore).
-    ( cd "$rp" && composer install --no-interaction --no-progress ) \
-      || warn "composer install failed for $rel (theme/plugin may not load)"
-  fi
-  if [[ -f "$rp/package.json" ]]; then
-    if [[ ! -d "$rp/node_modules" ]]; then
-      say "npm deps for $rel"
-      { [[ -d "$repo/node_modules" ]] && clone_dir "$repo/node_modules" "$rp/node_modules"; } \
-        || ( cd "$rp" && npm ci --no-audit --no-fund ) \
-        || warn "npm install failed for $rel (asset watcher may not run)"
-    fi
-    # A cloned node_modules mirrors the SOURCE checkout, which may sit on a
-    # different lockfile than base-ref — the env would then run on packages that
-    # do not match its own code. Reconcile only when the lockfiles actually
-    # differ, so the common case keeps the instant CoW path (this is the npm
-    # half of the reconcile the composer branch above always does).
-    if [[ -f "$rp/package-lock.json" ]] && ! cmp -s "$repo/package-lock.json" "$rp/package-lock.json"; then
-      say "lockfile differs from the source checkout; reconciling npm deps for $rel"
-      ( cd "$rp" && npm ci --no-audit --no-fund ) \
-        || warn "npm ci failed for $rel (dependencies may not match $base)"
-    fi
-  fi
+  provision_worktree_deps "$repo" "$install/$rel" "$rel"
+  for s in $siblings; do
+    add_sibling_worktree "$wproot/$s" "$install/$s" "$branch" "$s"
+  done
 
   # Ensure the theme/plugin repo has the lockfile-reconcile git hooks (idempotent,
   # quiet). Best-effort: a hook-install hiccup must never fail create.
@@ -479,6 +558,7 @@ EOF
   say "created '$name'"
   say "  install: $install"
   say "  worktree (edit here): $install/$rel"
+  for s in $siblings; do say "  sibling worktree:     $install/$s"; done
   say "  db:      $db"
   say "  serve:   agent-env-wp.sh serve $name   (-> http://$WEB_HOST:$web_port)"
 }
@@ -522,7 +602,7 @@ cmd_serve() {
   # last, orphaning the live server beyond stop's reach. Serving also must not
   # begin while destroy is tearing the env down. Same per-name mutex, held for
   # the startup sequence only — the server itself outlives this command.
-  take_env_lock "$(repo_root "$PWD")" "$name" "serving it"
+  take_env_lock "$AGENT_ENV_SITE" "$name" "serving it"
   local ed; ed=$(env_dir "$name")
   if server_alive "$ed/web.pid" "$AGENT_ENV_WEB_PORT"; then say "'$name' already serving"; return 0; fi
   port_busy "$AGENT_ENV_WEB_PORT" && die "port $AGENT_ENV_WEB_PORT in use (agent-env-wp.sh stop $name, or a stale process)"
@@ -597,43 +677,87 @@ cmd_destroy() {
   shift || true
   for arg in "$@"; do [[ "$arg" == "--force" ]] && force=1 || die "unknown flag: $arg"; done
   load_env "$name"
-  local repo ed uniq; repo=$(repo_root "$PWD"); ed=$(env_dir "$name")
+  local repo ed uniq wproot; repo=$(repo_root "$PWD"); ed=$(env_dir "$name"); wproot=$(wp_root "$repo")
+  # Never from inside the env: rm -rf would take the shell's working directory
+  # with it. Checked against the path rather than the session's launch
+  # directory: a hook that keyed on the launch directory lost track after a
+  # desktop-app restart, which relaunches the session where it is.
+  local here inst; here=$(pwd -P)
+  inst=$(cd "$AGENT_ENV_INSTALL" 2>/dev/null && pwd -P || printf '%s' "$AGENT_ENV_INSTALL")
+  [[ "$here" != "$inst" && "$here" != "$inst"/* ]] \
+    || die "destroy must run from outside the env. Move the session's working directory to $repo first (desktop app: change_directory; after EnterWorktree: ExitWorktree with action keep), then rerun: $repo/scripts/$(basename "$0") destroy $name"
   # meta.env exists from the start of create, so destroy can reach a live
   # creation. Take the lifecycle mutex for the whole teardown.
-  take_env_lock "$repo" "$name" "destroying it"
+  take_env_lock "$AGENT_ENV_SITE" "$name" "destroying it"
   uniq=$(unique_commits "$repo" "$AGENT_ENV_BRANCH")
   cmd_stop "$name" >/dev/null 2>&1 || true
+  local s srepo swt suniq
   if (( ! force )); then
-    # Only inspect a worktree that is actually there: a create that died before
-    # `git worktree add` leaves none, and that is precisely the state destroy
-    # exists to reclaim. But if the directory DOES exist and git cannot read it,
-    # treat that as unsafe rather than clean — suppressing the error would let
-    # rm -rf delete modified files.
-    if [[ -d "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" ]]; then
+    # Only inspect a worktree that is actually there (.git is a FILE): a create
+    # that died before `git worktree add` leaves either nothing or the CoW
+    # snapshot of the main checkout (.git a directory), which holds no work of
+    # its own and is what create would have rm -rf'd anyway. But if the worktree
+    # DOES exist and git cannot read it, treat that as unsafe rather than clean —
+    # suppressing the error would let rm -rf delete modified files.
+    if [[ -f "$AGENT_ENV_INSTALL/$AGENT_ENV_REL/.git" ]]; then
       local dirty strc=0
       dirty=$(git -C "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" status --porcelain 2>/dev/null) || strc=$?
       (( strc == 0 )) || die "'$name': cannot read the worktree's git status at $AGENT_ENV_INSTALL/$AGENT_ENV_REL (missing or corrupt metadata); inspect it, or rerun with --force to delete it anyway"
       [[ -z "$dirty" ]] || die "'$name' worktree has uncommitted changes; commit/push, or rerun with --force"
     fi
     [[ "$uniq" == "0" ]] || die "'$name' has $uniq commit(s) only on $AGENT_ENV_BRANCH; push/merge them, or --force"
+    # The same guard for every sibling worktree, all before anything is touched.
+    for s in ${AGENT_ENV_SIBLINGS:-}; do
+      srepo="$wproot/$s"; swt="$AGENT_ENV_INSTALL/$s"
+      [[ -e "$srepo/.git" ]] || continue
+      if [[ -f "$swt/.git" ]]; then
+        local sdirty sstrc=0
+        sdirty=$(git -C "$swt" status --porcelain 2>/dev/null) || sstrc=$?
+        (( sstrc == 0 )) || die "'$name': cannot read the sibling worktree's git status at $swt (missing or corrupt metadata); inspect it, or rerun with --force to delete it anyway"
+        [[ -z "$sdirty" ]] || die "'$name' sibling worktree $s has uncommitted changes; commit/push, or rerun with --force"
+      fi
+      suniq=$(unique_commits "$srepo" "$AGENT_ENV_BRANCH")
+      [[ "$suniq" == "0" ]] || die "'$name' has $suniq commit(s) only on $AGENT_ENV_BRANCH in sibling $s; push/merge them, or --force"
+    done
   fi
   say "dropping database $AGENT_ENV_DB"
   mysql -u root -h 127.0.0.1 -e "DROP DATABASE IF EXISTS \`$AGENT_ENV_DB\`" 2>/dev/null || warn "could not drop $AGENT_ENV_DB"
   git -C "$repo" worktree remove "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" 2>/dev/null \
     || git -C "$repo" worktree remove --force "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" 2>/dev/null || true
-  git -C "$repo" worktree prune
+  # A sibling checkout that moved away since create is skipped with a note
+  # rather than aborting the teardown half-way under set -e.
+  for s in ${AGENT_ENV_SIBLINGS:-}; do
+    srepo="$wproot/$s"
+    [[ -e "$srepo/.git" ]] || { warn "sibling $s checkout missing at $srepo; skipping its worktree and branch cleanup"; continue; }
+    git -C "$srepo" worktree remove "$AGENT_ENV_INSTALL/$s" 2>/dev/null \
+      || git -C "$srepo" worktree remove --force "$AGENT_ENV_INSTALL/$s" 2>/dev/null || true
+  done
   rm -rf "${AGENT_ENV_INSTALL:?}"
+  # Prune after the directory is gone, so a registration `worktree remove`
+  # could not clear is dropped too, and the branch below can be deleted.
+  git -C "$repo" worktree prune 2>/dev/null || true
   if [[ "$uniq" == "0" ]]; then
     git -C "$repo" branch -D "$AGENT_ENV_BRANCH" >/dev/null 2>&1 && say "deleted branch $AGENT_ENV_BRANCH (no unique commits)"
   else
     say "branch $AGENT_ENV_BRANCH kept ($uniq unique commit(s) recoverable)"
   fi
+  for s in ${AGENT_ENV_SIBLINGS:-}; do
+    srepo="$wproot/$s"
+    [[ -e "$srepo/.git" ]] || continue
+    git -C "$srepo" worktree prune 2>/dev/null || true
+    if [[ "$(unique_commits "$srepo" "$AGENT_ENV_BRANCH")" == "0" ]]; then
+      git -C "$srepo" branch -D "$AGENT_ENV_BRANCH" >/dev/null 2>&1 && say "sibling $s: deleted branch $AGENT_ENV_BRANCH (no unique commits)"
+    else
+      say "sibling $s: kept branch $AGENT_ENV_BRANCH (unique commits recoverable)"
+    fi
+  done
   rm -rf "$ed"
   # Free the slot so its ports return to the pool; the next new env reuses the
   # lowest free number (no persistence: recreating this name may get new ports).
-  rm -f "$repo/.agent-env/wp-slots/$name"
-  # Release the database-name claim so the name can be created again.
-  rm -rf "${AGENT_ENV_DB:+$repo/.agent-env/db-claims/$AGENT_ENV_DB}"
+  free_slot "$repo" "$AGENT_ENV_SITE" "$name"
+  # Release the database-name claim so the name can be created again (the
+  # second path is where versions before the shared pool kept it).
+  rm -rf "${AGENT_ENV_DB:+$ENV_PARENT/.db-claims/$AGENT_ENV_DB}" "${AGENT_ENV_DB:+$repo/.agent-env/db-claims/$AGENT_ENV_DB}"
   say "destroyed '$name' (slot ${AGENT_ENV_SLOT:-?} freed)"
 }
 

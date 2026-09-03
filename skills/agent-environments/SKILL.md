@@ -85,6 +85,11 @@ a pre-built one: `EnterWorktree` with `path: .claude/worktrees/<name>`.
 never removes an adopted worktree on `ExitWorktree`, so both paths are safe.
 Entering also changes how the session may operate; see
 [the next section](#what-enterworktree-switches-on-approval-and-isolation).
+**WordPress envs are the exception: never `EnterWorktree` into one.** A hook
+(`assets/agent-env-enter-worktree-gate.cjs`) refuses it; move the session with
+the desktop app's `mcp__ccd_directory__change_directory` instead, which binds
+nothing. The why and the day-to-day rules are in
+[`references/wordpress.md`](references/wordpress.md).
 
 ### What `EnterWorktree` switches on: approval and isolation
 
@@ -94,8 +99,9 @@ permission rule makes either go away, so don't burn time hunting for one.
 
 - **Approval.** A bare `EnterWorktree` allow rule in `~/.claude/settings.json`
   silences the prompt for worktrees under `.claude/worktrees/`, the standard
-  flow. A model-supplied `path` **outside** that directory (the WordPress
-  flow's envs) relocates the session's permission root, and the runtime always
+  flow. A model-supplied `path` **outside** that directory (any hand-made
+  worktree; a WordPress env is refused by the EnterWorktree gate before this
+  prompt) relocates the session's permission root, and the runtime always
   asks once, by design: no allow rule or "don't ask again" suppresses it (only
   `bypassPermissions` mode does, which we don't use). Expect exactly one
   prompt per out-of-tree adoption; that is working as intended, not a
@@ -105,21 +111,28 @@ permission rule makes either go away, so don't burn time hunting for one.
   edits targeting the main checkout; commands whose working directory it
   cannot trace (compound `cd` chains, `cd "$VAR"`); git aimed anywhere but
   this worktree (`git -C <main>`, `--git-dir`, `GIT_DIR`); and shapes it
-  cannot statically verify, e.g. brace expansion, heredocs with unquoted
-  delimiters, and anything containing an `eval` token, **including WP-CLI's
-  `wp eval` / `wp eval-file`** (a false positive with no override). The
-  vetting cannot be disabled or scoped, `permissions.additionalDirectories`
-  does not relax it, and subagents spawned from the session inherit it.
+  cannot statically verify: command substitution, `$VAR` inside a chained
+  command, brace-bearing heredocs (a PHP file with closures, even into the
+  worktree's own files), a heredoc chained with further commands, and git
+  chained with anything but its own `add && commit`. The Write/Edit tools
+  bypass the vetting. It cannot be disabled or scoped,
+  `permissions.additionalDirectories` does not relax it, and subagents
+  spawned from the session inherit it. Only the bound worktree's own parent
+  repo is protected; a sibling repo's main checkout is not.
+- **It survives compaction and an app restart, invisibly.** The desktop app
+  re-applies the binding when it resumes a session, and nothing in the
+  runtime's post-compaction context says the session is bound, so a session
+  cannot infer it except by being refused. `ExitWorktree` with action `keep`
+  lifts it at any point, including after both. A directory move with the
+  desktop `change_directory` tool never binds.
 
 Living with isolation: phrase Bash as single plain commands with literal
 arguments, run from the worktree cwd (arguments may *point* elsewhere, e.g.
 `wp --path=<install> option get x` passes; the vetting cares about working
-directory, git targets, and traceability). Sequence work that genuinely lives
-outside the worktree (the WordPress flow's env root) before entering or after
-`ExitWorktree`, and run `destroy` only from a non-anchored session, never from
-inside the worktree it is about to remove. WordPress specifics (what still
-works while anchored, and the `wp eval` replacement) are in
-[`references/wordpress.md`](references/wordpress.md).
+directory, git targets, and traceability), one git step per call. Sequence
+work that genuinely lives outside the worktree before entering or after
+`ExitWorktree`, and make `ExitWorktree` (action `keep`) the first wrap-up step,
+before any teardown, whether or not you can still see the `EnterWorktree` call.
 
 ### The cardinal rules (why they exist)
 
@@ -131,8 +144,9 @@ CLAUDE.md too. The reasoning:
   `agent-env.sh serve <name>`, which runs on the env's *own* ports. The project
   enforces this with a guard, but don't rely on the guard. Know the rule.
 - **Re-anchor after any restart or interruption.** A Claude restart (e.g.
-  hitting a usage limit) drops `EnterWorktree` tracking *and* can silently reset
-  the Bash cwd back to the main checkout on the default branch. Then an env
+  hitting a usage limit) can silently reset the Bash cwd back to the main
+  checkout on the default branch (the desktop app instead relaunches a resumed
+  session where it stood, binding included; check rather than assume). Then an env
   `npm test` / `git diff` runs against the **wrong code** and reports a false
   result: a passing suite for code you didn't change, an empty `main...HEAD`
   diff. The mechanical fix is `agent-env.sh run <name> -- <cmd>`: it resolves the
@@ -141,8 +155,9 @@ CLAUDE.md too. The reasoning:
   interruption (`run <name> -- npm test`, `run <name> -- git diff`). It `exec`s the
   command directly, so shell features (pipes, inline env) need `run <name> -- bash
   -lc '...'`. And `run` only wraps commands you author: a *skill invocation*
-  reads the session cwd itself and cannot be wrapped, so anchor the session
-  with `EnterWorktree` before skill-driven steps (see pre-PR step 0). As a
+  reads the session cwd itself and cannot be wrapped, so put the session in
+  the worktree first (`EnterWorktree` for a standard env, `change_directory`
+  for a WordPress env; see pre-PR step 0). As a
   fallback for what `run` doesn't cover, verify `pwd` and
   `git branch --show-current`, then prefer `git -C <worktree>` or an explicit `cd`
   into the env over trusting the cwd. Optional belt-and-suspenders: wire
@@ -188,10 +203,14 @@ CLAUDE.md too. The reasoning:
   `serve <name> --main-ports`; release the ports with `stop` when done. The
   mechanism is exported env vars beating the config file, so no files change.
 - **Teardown is guarded, so use it**: don't `rm -rf` an env or hand-delete its
-  branch. `destroy` refuses to remove dirty or unpushed work; it auto-deletes a
-  branch only once it's merged into `origin/main` (so `destroy` → `create` reuses
-  the name), and keeps unmerged branches as a recovery net (`create <name>
-  --resume` reattaches one). Commits survive in the main repo's `.git` regardless.
+  branch. `destroy` refuses to remove dirty or unpushed work. It deletes the
+  branch once every commit on it also exists somewhere else (another local
+  branch or any remote-tracking ref), so a pushed branch is deleted locally and
+  stays recoverable from the remote, and `destroy` → `create` reuses the name.
+  A branch still carrying commits found nowhere else can only be destroyed with
+  `--force`, and is then kept; the generic engine's `create <name> --resume`
+  reattaches it, while the WordPress script refuses `create` until it is
+  deleted or renamed by hand. Commits survive in the main repo's `.git` regardless.
 - **Never `git clean -fdx` at the main checkout root.** Envs are nested and
   gitignored, so `-x` would delete every one of them.
 - **Don't hand-rename env branches.** `provision` owns and enforces the canonical
@@ -259,22 +278,18 @@ table of contents every time, run or not. Other chapters around these are
 fine. If the harness has no chapter tool, don't block on it; the report in
 step 7 still carries the full record.
 
-0. **Anchor the session in the env worktree.** Steps 2–6 are *skill
+0. **Put the session in the env worktree.** Steps 2–6 are *skill
    invocations*, and a skill reads the **session cwd**: its pre-gathered
    context (git status, the diff it reviews) and its cwd-relative commands
    run wherever the session sits, and `run <name> -- <cmd>` cannot wrap a
-   skill. Use `EnterWorktree` with `path:` pointing at the env's worktree
-   (it adopts any worktree in `git worktree list`, including the WordPress
-   flow's envs outside the repo), or at minimum assert `pwd` before each
-   skill step. Observed failure without this: the built-in
+   skill. For a standard env use `EnterWorktree` with `path:` pointing at the
+   env's worktree; for a WordPress env use the desktop app's
+   `mcp__ccd_directory__change_directory` (a hook refuses `EnterWorktree`
+   there; the move takes effect at the end of the turn). At minimum assert
+   `pwd` before each skill step. Observed failure without this: the built-in
    `/security-review` pre-gathered its git status and diff from the main
    checkout (clean, on `main`) and returned a confident "no findings" over
-   an empty diff. Adopting a WordPress env (outside `.claude/worktrees/`)
-   asks for approval once, by design, and turns on Bash isolation (see
-   [What `EnterWorktree` switches on](#what-enterworktree-switches-on-approval-and-isolation));
-   steps 1-6 all operate inside the worktree, so they run under isolation
-   without friction. Env-root work is the exception: do it before anchoring,
-   or per [`references/wordpress.md`](references/wordpress.md).
+   an empty diff.
 1. **Verify** — the env's own test + build commands, via `run <name> -- <cmd>`.
 2. **`/simplify`** — quality cleanup of the diff (reuse, dead code, altitude).
 3. **`/security-review-plus`** — *if warranted*. It's cheap, so the bar is low:
@@ -551,7 +566,30 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   for the "re-root file-tool paths" cardinal rule. It identifies the worktree
   from git's own on-disk layout rather than a path pattern, so it covers every
   worktree location: `.claude/worktrees/`, the WordPress flow's envs outside the
-  repo, and any custom `ENV_PARENT`. Fails open.
+  repo, and any custom `ENV_PARENT`. Inside a WordPress env it also blocks
+  edits to every sibling repo's main checkout in the same install. Fails open.
+- [`assets/agent-env-main-guard.cjs`](assets/agent-env-main-guard.cjs): a
+  `PreToolUse` Bash hook for WordPress envs. While the session's cwd is inside
+  an env it refuses commands that mutate any main checkout of that site (`cd`,
+  mutating `git -C`, `rm`, `cp`/`mv` into, redirects into) and refuses
+  `destroy` of the env the shell stands in. Main checkouts come from git's
+  layout (gitdir pointers) plus the main install, so a sibling the env only
+  snapshotted is covered. Read-only git and `worktree add` into the env pass.
+  Fails open.
+- [`assets/agent-env-enter-worktree-gate.cjs`](assets/agent-env-enter-worktree-gate.cjs):
+  a `PreToolUse` hook on `EnterWorktree` that refuses a path inside a WordPress
+  env and names `change_directory` instead. `AGENT_ENV_ALLOW_ENTERWORKTREE=1`
+  in the settings `env` block turns it off. Fails open.
+- [`assets/agent-env-session-context.sh`](assets/agent-env-session-context.sh):
+  a `SessionStart` hook (startup, resume, compact) that, when the cwd is inside
+  a WordPress env, re-states the env, every main checkout of the site, which
+  checkout created it, and the teardown rule. Derived from the on-disk layout,
+  never from the launch directory (which the desktop app moves on resume).
+- [`tests/`](tests/): one node script per hook (the Bash guard, the edit guard,
+  the EnterWorktree gate, the SessionStart hook), each building its own
+  synthetic install (real git repos for the SessionStart hook) and asserting
+  the fail-open contract. `node tests/<file>` exits non-zero on a failure.
+  Change a hook, run its test.
 - [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh): a
   `SessionStart` hook that fires when provisioned envs exist. It reminds a resumed
   session to verify via `agent-env.sh run <name> -- <cmd>` (the proactive companion

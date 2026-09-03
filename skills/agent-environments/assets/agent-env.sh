@@ -17,7 +17,7 @@
 #   agent-env.sh serve <name|path> [--main-ports]
 #   agent-env.sh stop <name|path>
 #   agent-env.sh list
-#   agent-env.sh destroy <name|path> [--force]  # deletes the branch only if merged
+#   agent-env.sh destroy <name|path> [--force]  # deletes the branch when its commits exist elsewhere
 #   agent-env.sh install-hooks             # install git hooks that reconcile deps after a pull (setup; auto-run by provision)
 #   agent-env.sh sync-deps                 # reconcile deps if a pull changed a lockfile (called by the git hooks)
 #
