@@ -27,7 +27,32 @@ while [[ "$d" != "/" ]]; do
   if [[ -f "$d/wp-config.php" && "$(basename "$d")" == *__* ]]; then install="$d"; break; fi
   d=$(dirname "$d")
 done
-[[ -n "$install" ]] || exit 0
+if [[ -z "$install" ]]; then
+  # Not a WordPress env: a linked worktree of a repo that runs the generic
+  # engine (under <main>/.claude/worktrees/, or any worktree of a repo that
+  # carries scripts/agent-env.sh) gets the same reminder, because the binding
+  # and the wrap-up order are the same trap there.
+  d="$cwd"; wt=""
+  while [[ "$d" != "/" ]]; do
+    if [[ -f "$d/.git" ]]; then wt="$d"; break; fi
+    [[ -d "$d/.git" ]] && break
+    d=$(dirname "$d")
+  done
+  [[ -n "$wt" ]] || exit 0
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+  main=$(dirname "$common"); name=$(basename "$wt")
+  [[ "$wt" == "$main/.claude/worktrees/"* || -x "$main/scripts/agent-env.sh" ]] || exit 0
+  log="${HOME}/.claude/agent-env-hooks.log"
+  printf '%s session-context source=%s cwd=%s project=%s env=%s main=%s\n' "$(date '+%F %T')" "${source:-?}" "$cwd" "${CLAUDE_PROJECT_DIR:-?}" "$name" "$main" >>"$log" 2>/dev/null || true
+  echo "[agent-env] SessionStart(${source:-?}): this session's working directory is INSIDE the agent env worktree '${name}' of ${main} (${wt})."
+  echo "[agent-env] If this session ever called EnterWorktree, the runtime's worktree isolation is still on: it survives compaction and app restarts and is invisible in your context, so do not infer it from refusals."
+  if [[ -x "$main/scripts/agent-env.sh" ]]; then
+    echo "[agent-env] Wrap-up: call ExitWorktree with action \"keep\" first (a harmless no-op if you never entered), then run ${main}/scripts/agent-env.sh destroy ${name} from ${main}; destroy refuses to run from inside the worktree it removes."
+  else
+    echo "[agent-env] Wrap-up: call ExitWorktree with action \"keep\" first (a harmless no-op if you never entered), then remove the worktree from ${main} (git worktree remove), never from inside it."
+  fi
+  exit 0
+fi
 env_name="${install##*__}"; site="$(basename "$install")"; site="${site%%__*}"
 
 # Main checkouts, the same two ways the Bash guard finds them: every repo under

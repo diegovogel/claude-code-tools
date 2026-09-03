@@ -74,6 +74,22 @@ try {
   const noOwner = run(envTheme, "startup", mainTheme);
   check("no registry anywhere: generic teardown text, no creator marker", noOwner.out.includes(`.agent-env/wp/envx exists`) && !noOwner.out.includes("(created this env;"));
 
+  // Generic engine layout: a worktree under <repo>/.claude/worktrees/ of a repo with scripts/agent-env.sh.
+  const repo = path.join(root, "node-app");
+  const wt = path.join(repo, ".claude/worktrees/task-a");
+  fs.mkdirSync(path.join(repo, "scripts"), { recursive: true });
+  git(repo, "init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(repo, "scripts/agent-env.sh"), "#!/bin/sh\n"); fs.chmodSync(path.join(repo, "scripts/agent-env.sh"), 0o755);
+  git(repo, "add", "."); git(repo, "commit", "-q", "-m", "init");
+  git(repo, "worktree", "add", "-q", wt, "-b", "worktree-task-a");
+  const generic = run(wt, "compact", repo);
+  check("generic worktree: names the env, the main checkout and the worktree", generic.out.includes("agent env worktree 'task-a' of " + repo) && generic.out.includes(wt));
+  check("generic worktree: ExitWorktree keep first, then destroy from main", generic.out.includes('ExitWorktree with action "keep"') && generic.out.includes(`${repo}/scripts/agent-env.sh destroy task-a from ${repo}`));
+  check("generic worktree: silent from the main checkout itself", run(repo, "startup", repo).out === "");
+  const plainWt = path.join(root, "plain-wt");
+  git(mainPlugin, "worktree", "add", "-q", plainWt, "-b", "plain");
+  check("a hand-made worktree of a repo without the engine is not an env", run(plainWt, "startup", mainPlugin).out === "");
+
   check("silent outside any env", run(mainTheme, "startup", mainTheme).out === "");
   check("silent in a WP install without the __ marker", run(main, "startup", main).out === "");
   const bad = spawnSync("bash", [hook], { input: "{not json", env: { ...process.env, HOME: root }, encoding: "utf8" });

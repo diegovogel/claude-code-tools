@@ -619,6 +619,12 @@ cmd_destroy() {
   require_not_main "$env" "$main"
   name=$(basename "$env")
   branch=$(git -C "$env" rev-parse --abbrev-ref HEAD)
+  # Never from inside the worktree it removes: the shell's working directory
+  # would vanish, and a session bound to it by EnterWorktree cannot leave a
+  # deleted worktree cleanly. Move the session to the main checkout first.
+  local here envp; here=$(pwd -P); envp=$(cd "$env" 2>/dev/null && pwd -P || printf '%s' "$env")
+  [[ "$here" != "$envp" && "$here" != "$envp"/* ]] \
+    || die "destroy must run from outside the worktree it removes. Leave it first (ExitWorktree with action keep, or move the session to $main), then rerun: $main/scripts/$(basename "$0") destroy $name"
 
   cmd_stop "$env" >/dev/null 2>&1 || true
 

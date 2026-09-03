@@ -203,7 +203,9 @@ CLAUDE.md too. The reasoning:
   `serve <name> --main-ports`; release the ports with `stop` when done. The
   mechanism is exported env vars beating the config file, so no files change.
 - **Teardown is guarded, so use it**: don't `rm -rf` an env or hand-delete its
-  branch. `destroy` refuses to remove dirty or unpushed work. It deletes the
+  branch. `destroy` refuses to run from inside the worktree it removes (leave
+  it first: `ExitWorktree` with action `keep`, then run it from the main
+  checkout) and refuses to remove dirty or unpushed work. It deletes the
   branch once every commit on it also exists somewhere else (another local
   branch or any remote-tracking ref), so a pushed branch is deleted locally and
   stays recoverable from the remote, and `destroy` → `create` reuses the name.
@@ -581,10 +583,14 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   env and names `change_directory` instead. `AGENT_ENV_ALLOW_ENTERWORKTREE=1`
   in the settings `env` block turns it off. Fails open.
 - [`assets/agent-env-session-context.sh`](assets/agent-env-session-context.sh):
-  a `SessionStart` hook (startup, resume, compact) that, when the cwd is inside
-  a WordPress env, re-states the env, every main checkout of the site, which
-  checkout created it, and the teardown rule. Derived from the on-disk layout,
-  never from the launch directory (which the desktop app moves on resume).
+  a `SessionStart` hook (every source) that, when the cwd is inside a WordPress
+  env, re-states the env, every main checkout of the site, which checkout
+  created it, and the teardown rule; inside a generic engine worktree
+  (`.claude/worktrees/`, or any worktree of a repo carrying
+  `scripts/agent-env.sh`) it re-states the main checkout and the wrap-up order
+  (`ExitWorktree` keep, then `destroy` from the main checkout). Derived from
+  the on-disk layout, never from the launch directory (which the desktop app
+  moves on resume). Wired user-level in `~/.claude/settings.json`.
 - [`tests/`](tests/): one node script per hook (the Bash guard, the edit guard,
   the EnterWorktree gate, the SessionStart hook), each building its own
   synthetic install (real git repos for the SessionStart hook) and asserting

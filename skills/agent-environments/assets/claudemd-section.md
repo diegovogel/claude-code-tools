@@ -62,9 +62,10 @@ queue worker." >
   procedure and hand it off rather than driving a headless browser." Or an extra
   gate: "also run `<LINT_CMD>` before stopping." Delete this bracketed part if
   the project has none. >
-- **Cleanup**: after merge, `<npm run destroy <name>>`. It refuses to remove
-  anything dirty or unpushed (commits survive in the main repo's `.git`
-  regardless). A branch whose commits all exist elsewhere (another branch or a
+- **Cleanup**: after merge, `<npm run destroy <name>>`, from the main checkout:
+  it refuses to run from inside the worktree it removes (`ExitWorktree` with
+  action `keep` first). It refuses to remove anything dirty or unpushed
+  (commits survive in the main repo's `.git` regardless). A branch whose commits all exist elsewhere (another branch or a
   remote) is deleted so the name can be recreated; one still carrying commits
   found nowhere else needs `--force` and is kept (`create <name> --resume`
   reattaches one).

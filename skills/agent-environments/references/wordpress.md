@@ -183,7 +183,8 @@ session in whatever directory it was moved to:
 - `PreToolUse` EnterWorktree → `assets/agent-env-enter-worktree-gate.cjs`.
 - `SessionStart`, every source (no matcher) → `assets/agent-env-session-context.sh`:
   re-states the env, every main checkout, which one created it, and the
-  teardown rule, so the facts survive a compaction, a `/clear` or a restart.
+  teardown rule, so the facts survive a compaction, a `/clear` or a restart
+  (the same hook covers the generic engine's `.claude/worktrees/` envs).
 
 Teardown runs from the main checkout that created the env: move the session
 back with `change_directory`, then `scripts/agent-env-wp.sh destroy <name>`.
