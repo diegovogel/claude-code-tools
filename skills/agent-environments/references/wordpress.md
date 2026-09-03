@@ -148,50 +148,70 @@ Bash: a package-install gate hook denies any Bash call whose command line
 contains `npx`, even `npx --no-install` (the hook reads the command line, not
 the script body, so inside the script it is a matter of consistency).
 
-## Working inside an env: move the session, never bind it
+## Working inside an env: bind with `EnterWorktree`, exit before teardown
 
 The pre-PR workflow and most implementation work want the session's cwd inside
-the env's theme/plugin worktree. Move it there with the desktop app's
-`mcp__ccd_directory__change_directory` (effective when the turn ends; the app
-asks once per move and no permission rule suppresses that, so budget two
-prompts per env: in, and back out). Do **not** `EnterWorktree` into a WordPress
-env, and a hook (`assets/agent-env-enter-worktree-gate.cjs`) refuses it:
-binding switches on the runtime's worktree isolation, which refuses the
-command shapes ordinary work needs (any `git -C` at a main checkout, command
-substitution, `$VAR` in a chained command, heredocs with braces, chained git;
-the lifecycle script itself still runs), and it survives compaction and app
-restarts while leaving no trace in the session's context (SKILL.md, "What
-`EnterWorktree` switches on"). If a bound session is
-ever wanted, `AGENT_ENV_ALLOW_ENTERWORKTREE=1` in the settings `env` block turns
-the gate off, and `ExitWorktree` (action `keep`) becomes the first wrap-up step.
+the env's theme/plugin worktree. Enter it with `EnterWorktree` (`path:` the
+env's worktree). Because that path is outside `.claude/worktrees/`, the runtime
+asks for approval once per env, by design (no allow rule suppresses it), and
+the move takes effect immediately, so an unattended run continues without a
+turn boundary. From then until `ExitWorktree` the session runs under the
+runtime's worktree isolation (SKILL.md, "What `EnterWorktree` switches on"):
 
-An unbound session inside an env is ordinary: plain `wp <command>` works from
-the worktree (WP-CLI walks up to the env's `wp-config.php`), heredocs, chained
-commands and command substitution all pass, and `git -C` reaches every repo.
-What keeps that from touching the main checkouts is four user-level hooks in
-`~/.claude/settings.json`, all keyed on the on-disk layout (the env's
-`<site>__<name>` install and the worktrees' gitdir pointers), never on the
-session's launch directory, because the desktop app relaunches a resumed
-session in whatever directory it was moved to:
+- Plain `wp <command>` from the worktree just works (WP-CLI walks up to the
+  env's `wp-config.php`); single plain commands with literal arguments pass,
+  and a `wp --path=<install> ...` form may point anywhere.
+- Refused while bound: any `git -C` at the main checkout, command
+  substitution, `$VAR` inside a chained command, heredocs with braces (a PHP
+  file with closures, even into the worktree's own files), a heredoc chained
+  with more commands, and git chained with anything but its own
+  `add && commit`. Write/Edit bypass the vetting, so write PHP with them, and
+  run git one step per call.
+- The sibling worktree (the plugin beside a theme env, or the reverse) is
+  fully usable by absolute path and `git -C <env sibling>`; it cannot become
+  the session's cwd (adoption is limited to the launch repo's worktrees), so
+  cwd-reading review skills see only the entered repo's diff. Hand them the
+  sibling's diff explicitly.
+- The binding survives compaction and an app restart and leaves no trace in
+  the session's context. `ExitWorktree` with action `keep` lifts it at any
+  point and is the first wrap-up step, before `destroy`.
+
+The alternative, moving the session with the desktop app's
+`mcp__ccd_directory__change_directory`, binds nothing and has none of that
+friction, but a directory move only lands when the turn ends: a session that
+keeps working never gets there, and calling the tool again only re-prompts.
+It also costs a second folder prompt on the way out and two turn boundaries.
+That is why binding is the default. To force the move-only flow instead, wire
+`assets/agent-env-enter-worktree-gate.cjs` as a `PreToolUse` hook on
+`EnterWorktree`: it refuses a path inside a WordPress env and names
+`change_directory`, and `AGENT_ENV_ALLOW_ENTERWORKTREE=1` turns it back off.
+
+Whichever way the session got in, three user-level hooks in
+`~/.claude/settings.json` keep it off the main checkouts. All key on the
+on-disk layout (the env's `<site>__<name>` install and the worktrees' gitdir
+pointers), never on the session's launch directory, because the desktop app
+relaunches a resumed session in whatever directory it stood in:
 
 - `PreToolUse` Bash → `assets/agent-env-main-guard.cjs`: refuses `cd`,
   mutating `git -C`, `rm`, `cp`/`mv` and redirects aimed at any main checkout
-  of the site, and `destroy` of the env the shell stands in. Read-only git and
-  the lifecycle script's other commands pass.
+  of the site (the sibling's included, which the runtime never covers), and
+  `destroy` of the env the shell stands in. Read-only git and the lifecycle
+  script's other commands pass.
 - `PreToolUse` Edit|Write → `assets/worktree-edit-guard.cjs`: refuses file
-  edits to the worktree's main checkout.
-- `PreToolUse` EnterWorktree → `assets/agent-env-enter-worktree-gate.cjs`.
+  edits to any main checkout of the site.
 - `SessionStart`, every source (no matcher) → `assets/agent-env-session-context.sh`:
-  re-states the env, every main checkout, which one created it, and the
-  teardown rule, so the facts survive a compaction, a `/clear` or a restart
-  (the same hook covers the generic engine's `.claude/worktrees/` envs).
+  re-states the env, every main checkout, which one created it, the binding
+  warning and the teardown rule, so the facts survive a compaction, a `/clear`
+  or a restart (the same hook covers the generic engine's `.claude/worktrees/`
+  envs).
 
-Teardown runs from the main checkout that created the env: move the session
-back with `change_directory`, then `scripts/agent-env-wp.sh destroy <name>`.
-Both the script and the guard refuse a destroy from inside the env (the
-`rm -rf` would take the shell's working directory with it). An env's own
-`scripts/` copy is whatever its branch last committed, so commit the script
-after changing it, or an env created afterwards still carries the old copy.
+Teardown runs from the main checkout that created the env: `ExitWorktree`
+(action `keep`) first, then `scripts/agent-env-wp.sh destroy <name>` from
+there, in the same turn. Both the script and the guard refuse a destroy from
+inside the env (the `rm -rf` would take the shell's working directory with
+it). An env's own `scripts/` copy is whatever its branch last committed, so
+commit the script after changing it, or an env created afterwards still
+carries the old copy.
 
 ## Sibling repos: theme + plugin in one env
 

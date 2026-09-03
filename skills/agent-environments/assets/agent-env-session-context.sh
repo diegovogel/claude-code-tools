@@ -96,7 +96,7 @@ if [[ -n "$mains" ]]; then
   done
 fi
 if [[ -n "$owner" ]]; then
-  echo "[agent-env] Teardown: ${owner}/scripts/agent-env-wp.sh destroy ${env_name} refuses to run from inside the env. Move the session's working directory to ${owner} first (desktop app: mcp__ccd_directory__change_directory), then run it there; it reclaims every worktree the env holds."
+  echo "[agent-env] Teardown: ${owner}/scripts/agent-env-wp.sh destroy ${env_name} refuses to run from inside the env. Leave first: ExitWorktree with action \"keep\" if the session entered with EnterWorktree (the default), or move it back to ${owner} with mcp__ccd_directory__change_directory if it was moved; then run destroy from ${owner}. It reclaims every worktree the env holds."
 else
   echo "[agent-env] Teardown: run the lifecycle script's destroy from the main checkout that created this env (the one whose .agent-env/wp/${env_name} exists); it refuses to run from inside the env."
 fi

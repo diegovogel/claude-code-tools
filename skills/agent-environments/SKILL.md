@@ -85,10 +85,13 @@ a pre-built one: `EnterWorktree` with `path: .claude/worktrees/<name>`.
 never removes an adopted worktree on `ExitWorktree`, so both paths are safe.
 Entering also changes how the session may operate; see
 [the next section](#what-enterworktree-switches-on-approval-and-isolation).
-**WordPress envs are the exception: never `EnterWorktree` into one.** A hook
-(`assets/agent-env-enter-worktree-gate.cjs`) refuses it; move the session with
-the desktop app's `mcp__ccd_directory__change_directory` instead, which binds
-nothing. The why and the day-to-day rules are in
+WordPress envs are entered the same way, with `path:` pointing at the env's
+worktree outside the repo; that adoption asks for approval once per env, by
+design. The alternative, moving the session with the desktop app's
+`change_directory` (no binding, no command-shape friction), costs a second
+prompt on the way out and two turn boundaries, because a directory move only
+lands when the turn ends, which an unattended run never reaches. That is why
+binding is the default; the trade-off and the opt-in move-only flow are in
 [`references/wordpress.md`](references/wordpress.md).
 
 ### What `EnterWorktree` switches on: approval and isolation
@@ -284,11 +287,11 @@ step 7 still carries the full record.
    invocations*, and a skill reads the **session cwd**: its pre-gathered
    context (git status, the diff it reviews) and its cwd-relative commands
    run wherever the session sits, and `run <name> -- <cmd>` cannot wrap a
-   skill. For a standard env use `EnterWorktree` with `path:` pointing at the
-   env's worktree; for a WordPress env use the desktop app's
-   `mcp__ccd_directory__change_directory` (a hook refuses `EnterWorktree`
-   there; the move takes effect at the end of the turn). At minimum assert
-   `pwd` before each skill step. Observed failure without this: the built-in
+   skill. Use `EnterWorktree` with `path:` pointing at the env's worktree,
+   for standard and WordPress envs alike; it takes effect immediately. (A
+   `change_directory` move only lands when the turn ends, so a session that
+   keeps working never gets there; do not reach for it mid-turn.) At minimum
+   assert `pwd` before each skill step. Observed failure without this: the built-in
    `/security-review` pre-gathered its git status and diff from the main
    checkout (clean, on `main`) and returned a confident "no findings" over
    an empty diff.
@@ -579,9 +582,11 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   snapshotted is covered. Read-only git and `worktree add` into the env pass.
   Fails open.
 - [`assets/agent-env-enter-worktree-gate.cjs`](assets/agent-env-enter-worktree-gate.cjs):
-  a `PreToolUse` hook on `EnterWorktree` that refuses a path inside a WordPress
-  env and names `change_directory` instead. `AGENT_ENV_ALLOW_ENTERWORKTREE=1`
-  in the settings `env` block turns it off. Fails open.
+  opt-in, not wired by default. Wired as a `PreToolUse` hook on
+  `EnterWorktree`, it refuses a path inside a WordPress env and names
+  `change_directory` instead, which forces the move-only flow described in
+  `references/wordpress.md`. `AGENT_ENV_ALLOW_ENTERWORKTREE=1` in the settings
+  `env` block turns it off again. Fails open.
 - [`assets/agent-env-session-context.sh`](assets/agent-env-session-context.sh):
   a `SessionStart` hook (every source) that, when the cwd is inside a WordPress
   env, re-states the env, every main checkout of the site, which checkout

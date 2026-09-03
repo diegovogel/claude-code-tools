@@ -96,8 +96,9 @@ through `/compact` and a real app quit + resume. Facts established:
 | An env's in-tree `scripts/agent-env-wp.sh` is whatever its branch last committed. | Guards that matter must also live in a hook, and script changes must be committed to reach envs. |
 | A hand-typed Bash call containing `npx` (even `npx --no-install`) is denied whole by the package-install gate. | Use `node_modules/.bin/<tool>`. |
 
-Both A and B passed. B was chosen and hardcoded: the hooks are identical for
-both, so A stays available by setting `AGENT_ENV_ALLOW_ENTERWORKTREE=1`.
+Both A and B passed. B was chosen first, for its lack of command-shape
+friction; the hooks are identical for both. Section 7 records why that was
+reversed the next day.
 
 ## 5. What was built
 
@@ -126,7 +127,31 @@ dirty guard applied to a half-built env's CoW snapshot; and the claim that
 branches are kept "until merged into origin/main" (the rule is "no commit found
 nowhere else").
 
-## 6. Left open
+## 6. Why binding (A) is the default after all
+
+The first day in the field showed the cost of the move-only flow. A session
+created its env and called `change_directory`, but a directory move lands only
+when the turn ends, and an autonomous run (plan approved, implement, pre-PR
+chain) never ends its turn. The session called the tool three times (three
+folder prompts, none effective), worked from the main checkout all day, and
+compensated with `run <name> --`, `cd` inside single Bash calls and diffs handed
+to reviewers by hand; the cwd-reading review skills saw the main checkout until
+it did. A sibling session got its move only because its turn happened to end
+while review agents ran in the background.
+
+Counted per env, A costs one approval prompt on entry and no turn boundaries
+(`EnterWorktree` and `ExitWorktree` keep both take effect immediately, and the
+wrap-up runs unattended in one turn); B costs two prompts and two turn
+boundaries. The envs exist for unattended work, so binding became the default
+on 2026-09-03. Nothing else changed: the hooks, the script refusals and the
+sibling worktrees are approach-agnostic, the wrap-up already starts with
+`ExitWorktree` keep, and the binding's invisibility is now a loud refusal
+instead of a wedge. The price is the bound session's command-shape friction
+(one git step per call, Write/Edit for brace-bearing files), accepted as
+cheaper than a human in the loop. The EnterWorktree gate stays in the skill,
+unwired, as the switch back to the move-only flow.
+
+## 7. Left open
 
 - The resume-hook inconsistency between the two restarts was not explained.
 - Whether `wp eval '<inline code>'` is refused while bound was not tested; a
