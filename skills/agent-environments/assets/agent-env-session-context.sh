@@ -42,7 +42,7 @@ if [[ -z "$install" ]]; then
   common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
   main=$(dirname "$common"); name=$(basename "$wt")
   [[ "$wt" == "$main/.claude/worktrees/"* || -x "$main/scripts/agent-env.sh" ]] || exit 0
-  log="${HOME}/.claude/agent-env-hooks.log"
+  log="${HOME}/.claude/cache/agent-env-hooks.log"; mkdir -p "${log%/*}" 2>/dev/null
   printf '%s session-context source=%s cwd=%s project=%s env=%s main=%s\n' "$(date '+%F %T')" "${source:-?}" "$cwd" "${CLAUDE_PROJECT_DIR:-?}" "$name" "$main" >>"$log" 2>/dev/null || true
   echo "[agent-env] SessionStart(${source:-?}): this session's working directory is INSIDE the agent env worktree '${name}' of ${main} (${wt})."
   echo "[agent-env] If this session ever called EnterWorktree, the runtime's worktree isolation is still on: it survives compaction and app restarts and is invisible in your context, so do not infer it from refusals."
@@ -85,7 +85,7 @@ done
 owner=""
 for m in $mains; do [[ -f "$m/.agent-env/wp/$env_name/meta.env" ]] && { owner="$m"; break; }; done
 
-log="${HOME}/.claude/agent-env-hooks.log"
+log="${HOME}/.claude/cache/agent-env-hooks.log"; mkdir -p "${log%/*}" 2>/dev/null
 printf '%s session-context source=%s cwd=%s project=%s env=%s owner=%s\n' "$(date '+%F %T')" "${source:-?}" "$cwd" "${CLAUDE_PROJECT_DIR:-?}" "$env_name" "${owner:-?}" >>"$log" 2>/dev/null || true
 
 echo "[agent-env] SessionStart(${source:-?}): this session's working directory is INSIDE the WordPress agent env '${env_name}' (site '${site}'), install: ${install}."

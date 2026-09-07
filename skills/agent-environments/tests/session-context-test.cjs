@@ -17,7 +17,7 @@ const mainPlugin = path.join(main, "wp-content/plugins/p");
 const envTheme = path.join(env, "wp-content/themes/t");
 const envPlugin = path.join(env, "wp-content/plugins/p");
 const registry = path.join(mainTheme, ".agent-env/wp/envx/meta.env");
-const log = path.join(root, ".claude/agent-env-hooks.log");
+const log = path.join(root, ".claude/cache/agent-env-hooks.log");
 
 function git(cwd, ...args) {
   const r = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
@@ -26,7 +26,7 @@ function git(cwd, ...args) {
 }
 
 function run(cwd, source, project) {
-  const e = { ...process.env, HOME: root }; // the hook's log lands under $HOME/.claude
+  const e = { ...process.env, HOME: root }; // the hook's log lands under $HOME/.claude/cache
   delete e.CLAUDE_PROJECT_DIR;
   if (project) e.CLAUDE_PROJECT_DIR = project;
   const r = spawnSync("bash", [hook], { input: JSON.stringify({ cwd, source }), env: e, encoding: "utf8" });
