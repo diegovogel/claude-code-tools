@@ -176,7 +176,16 @@ wp_root() {  # walk up from $1 until a dir holds wp-config.php
 
 # Per-env state (slot/port/db/install/rel/site + pidfiles) lives under the repo's
 # .agent-env/wp/<name>/, alongside the repo, gitignored via .git/info/exclude.
-env_dir() { echo "$(repo_root "$PWD")/.agent-env/wp/$1"; }
+# The name is interpolated into a path whose meta.env is later `source`d, and
+# destroy then `rm -rf`s what that file sets, so validate here and not only in
+# cmd_create: run/serve/stop/destroy all reach this without passing through
+# create's check, so `destroy '../../../../tmp/x'` would otherwise source
+# /tmp/x/meta.env as shell. Character class only -- create's length limit is a
+# naming policy, this is the part that closes traversal.
+env_dir() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "invalid env name: $1"
+  echo "$(repo_root "$PWD")/.agent-env/wp/$1"
+}
 
 # Slots live under ENV_PARENT, not under the repo, because ports are machine-wide:
 # every repo whose script points at the same ENV_PARENT draws from one pool, so a
@@ -481,15 +490,15 @@ cmd_create() {
   # possibly a database that `destroy` cannot see and `create` refuses to reuse.
   local ed; ed=$(env_dir "$name"); mkdir -p "$ed"
   cat >"$ed/meta.env" <<EOF
-AGENT_ENV_NAME=$name
-AGENT_ENV_SLOT=$slot
-AGENT_ENV_SITE=$site
-AGENT_ENV_REL=$rel
-AGENT_ENV_INSTALL=$install
-AGENT_ENV_BRANCH=$branch
-AGENT_ENV_DB=$db
-AGENT_ENV_WEB_PORT=$web_port
-AGENT_ENV_ASSET_PORT=$asset_port
+AGENT_ENV_NAME="$name"
+AGENT_ENV_SLOT="$slot"
+AGENT_ENV_SITE="$site"
+AGENT_ENV_REL="$rel"
+AGENT_ENV_INSTALL="$install"
+AGENT_ENV_BRANCH="$branch"
+AGENT_ENV_DB="$db"
+AGENT_ENV_WEB_PORT="$web_port"
+AGENT_ENV_ASSET_PORT="$asset_port"
 AGENT_ENV_SIBLINGS="$siblings"
 EOF
 
