@@ -647,7 +647,13 @@ cmd_stop() {
   local ed port; ed=$(env_dir "$name"); local pidfile pid
   # Read the port directly rather than via load_env, which dies on a missing
   # meta.env — stop must stay usable from destroy's cleanup path.
-  port=$(sed -n 's/^AGENT_ENV_WEB_PORT=//p' "$ed/meta.env" 2>/dev/null || true)
+  # tr -d '"' because meta.env values are written quoted: this reads the file
+  # TEXTUALLY rather than sourcing it, so the quotes would survive into the port
+  # and server_alive would then hunt for `--port="18702"`, never match the live
+  # process, and let stop delete the pidfile without killing the server --
+  # orphaning it on a port the next serve needs. Tolerates envs created before
+  # the values were quoted, whose meta.env has no quotes to strip.
+  port=$(sed -n 's/^AGENT_ENV_WEB_PORT=//p' "$ed/meta.env" 2>/dev/null | tr -d '"' || true)
   for pidfile in "$ed"/*.pid; do
     [[ -e "$pidfile" ]] || continue
     pid=$(cat "$pidfile" 2>/dev/null || true)
