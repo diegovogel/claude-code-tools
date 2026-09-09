@@ -70,6 +70,14 @@ try {
   const fromSnapshot = run(envPlugin, "startup", mainTheme);
   check("from inside the snapshot plugin: both mains still found", fromSnapshot.out.includes(mainPlugin) && fromSnapshot.out.includes(mainTheme));
 
+  // A worktree whose wp-env port the lifecycle script pinned: the hook names it.
+  check("no wp-env line without an override file", !inEnv.out.includes("wp-env of"));
+  fs.writeFileSync(path.join(envTheme, ".wp-env.override.json"), '{\n\t"port": 18306,\n\t"testsPort": 18307,\n\t"env": {\n\t\t"development": {\n\t\t\t"port": 18306\n\t\t}\n\t}\n}\n');
+  const withWpEnv = run(envTheme, "compact", mainTheme);
+  check("names the worktree's wp-env port from its override file", withWpEnv.out.includes(`wp-env of ${envTheme}: http://localhost:18306`));
+  check("wp-env line says to read the port from the file, never npx", withWpEnv.out.includes("reads the port from that file") && withWpEnv.out.includes("never bare npx"));
+  fs.rmSync(path.join(envTheme, ".wp-env.override.json"));
+
   fs.rmSync(registry);
   const noOwner = run(envTheme, "startup", mainTheme);
   check("no registry anywhere: generic teardown text, no creator marker", noOwner.out.includes(`.agent-env/wp/envx exists`) && !noOwner.out.includes("(created this env;"));

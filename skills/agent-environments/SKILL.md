@@ -620,9 +620,15 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
 - [`assets/agent-env-wp.sh`](assets/agent-env-wp.sh): a WordPress-specific flow for
   when the git repo is a theme/plugin inside a full install, the env clones the
   whole WP install and nests the repo as a worktree. Reuses the engine's primitives.
+  Every worktree that carries a `.wp-env.json` also gets its own wp-env ports from
+  the same slot pool, pinned in a gitignored `.wp-env.override.json`, so each
+  env runs the repo's integration/e2e stack concurrently; `destroy` reclaims
+  those stacks.
 - [`references/wordpress.md`](references/wordpress.md): the WordPress model and its
   hard-won gotchas (`wp server` workers, browser-sync, `--skip-plugins`, URL /
-  search-replace, per-env DB).
+  search-replace, per-env DB), and the wp-env-inside-an-env contract (why the
+  suites keep wp-env rather than the env's own install, how the port is pinned,
+  and the "tests must read the port" rule with the PHP and JS resolvers).
 - [`references/history-wordpress-worktree-redesign.md`](references/history-wordpress-worktree-redesign.md):
   why the WordPress flow moves sessions instead of binding them, why clones were
   rejected, and the runtime facts the field tests established. History, not

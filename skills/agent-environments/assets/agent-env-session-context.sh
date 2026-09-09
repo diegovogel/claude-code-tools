@@ -95,6 +95,16 @@ if [[ -n "$mains" ]]; then
     if [[ "$m" == "$owner" ]]; then echo "[agent-env]   - $m  (created this env; its registry lists it)"; else echo "[agent-env]   - $m"; fi
   done
 fi
+# A worktree's wp-env (its integration/e2e stack) listens on a port the
+# lifecycle script pinned from the machine-wide slot pool, not the default one
+# every checkout's .wp-env.json names; the pin is the override file wp-env
+# itself reads, so the tests must read it too.
+for repo in "$install"/wp-content/themes/*/ "$install"/wp-content/plugins/*/; do
+  [[ -f "$repo.wp-env.override.json" ]] || continue
+  port=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$repo.wp-env.override.json" 2>/dev/null | head -1)
+  [[ -n "$port" ]] || continue
+  echo "[agent-env] wp-env of ${repo%/}: http://localhost:${port} (pinned in its .wp-env.override.json from the slot pool, so it runs beside other envs' stacks). Start, run and stop it from that worktree with node_modules/.bin/wp-env (never bare npx); leave the pin alone, and make sure the suite reads the port from that file rather than the default."
+done
 if [[ -n "$owner" ]]; then
   echo "[agent-env] Teardown: ${owner}/scripts/agent-env-wp.sh destroy ${env_name} refuses to run from inside the env. Leave first: ExitWorktree with action \"keep\" if the session entered with EnterWorktree (the default), or move it back to ${owner} with mcp__ccd_directory__change_directory if it was moved; then run destroy from ${owner}. It reclaims every worktree the env holds."
 else

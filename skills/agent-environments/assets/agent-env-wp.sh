@@ -12,16 +12,20 @@
 # Run this from the theme/plugin repo's MAIN checkout. It finds the enclosing WP
 # install automatically. Sibling repos listed in SIBLING_REPOS get a worktree of
 # their own in every env, on the same branch name, and are reclaimed by destroy.
+# A worktree that carries .wp-env.json (the repo's integration/e2e stack) gets
+# wp-env ports of its own from the same slot pool, pinned in a gitignored
+# .wp-env.override.json, so every env can run its suites concurrently.
 #
 # Usage:
-#   agent-env-wp.sh create <name> [base-ref]   # clone install + worktree(s) + DB + config
+#   agent-env-wp.sh create <name> [base-ref]   # clone install + worktree(s) + DB + config + wp-env ports
 #   agent-env-wp.sh run <name> -- <cmd...>     # run a command IN the env's worktree, cwd-independent
 #   agent-env-wp.sh serve <name>               # wp server (+ asset watcher) on the env's port
 #   agent-env-wp.sh stop <name>
 #   agent-env-wp.sh list
-#   agent-env-wp.sh destroy <name> [--force]   # drop DB, remove clone + worktrees, delete branches if no unique commits; refuses to run from inside the env
+#   agent-env-wp.sh destroy <name> [--force]   # reclaim wp-env stacks, drop DB, remove clone + worktrees, delete branches if no unique commits; refuses to run from inside the env
 #   agent-env-wp.sh install-hooks              # install git hooks that reconcile theme/plugin deps after a pull (auto-run by create)
 #   agent-env-wp.sh sync-deps                  # reconcile deps if a pull changed a lockfile (called by the git hooks)
+#   agent-env-wp.sh prune-wp-envs [--dry-run]  # reclaim wp-env stacks left by envs that no longer exist (destroy runs this itself)
 #
 # Reuses the generic engine's primitives (slots, unique_commits guard, pid/health
 # machinery, CoW clone). See references/wordpress.md for the model and rationale.
@@ -43,8 +47,13 @@ warn() { echo "agent-env-wp: WARNING: $*" >&2; }
 # the clones don't get auto-served as <name>.test; we serve them via wp server.
 ENV_PARENT="$HOME/WebDev/Sites/.wp-agent-envs"
 PORT_BASE=18300                 # slot N -> PORT_BASE + PORT_STRIDE*N
-PORT_STRIDE=2                   # >= PORTS_PER_ENV (the floor); densest packing
-PORTS_PER_ENV=2                 # wp server + (optional) asset dev/watch server
+PORT_STRIDE=2                   # >= PORTS_PER_ENV (the floor); densest packing.
+                                # Every fork sharing ENV_PARENT must use the SAME
+                                # stride: the pool's slot math is (port-base)/stride.
+PORTS_PER_ENV=2                 # wp server + (optional) asset dev/watch server. A
+                                # worktree's wp-env takes a slot of its own (see
+                                # setup_wp_env), so this also has to cover wp-env's
+                                # two ports (development + tests); keep it >= 2.
 CANONICAL_BRANCH_PREFIX="worktree-"
 WP="wp"                         # WP-CLI binary
 WP_SERVER_WORKERS=4             # php -S worker count; MUST be >1 or WordPress
@@ -137,6 +146,12 @@ unique_commits() {
 }
 canonical_branch() { printf '%s%s\n' "$CANONICAL_BRANCH_PREFIX" "$1"; }
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_'; }
+md5_str() { # string -> md5 hex (macOS ships md5, Linux md5sum)
+  if command -v md5 >/dev/null 2>&1; then md5 -q -s "$1"; else printf '%s' "$1" | md5sum | cut -d' ' -f1; fi
+}
+run_with_timeout() { # seconds cmd... (plain cmd when no timeout binary)
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
+}
 
 # ---- WordPress-specific helpers -------------------------------------------
 # The MAIN checkout, resolved from anywhere -- including from inside an env's own
@@ -192,17 +207,23 @@ env_dir() {
 # theme env and a plugin env of the same site (or of two sites) never share a
 # port without anyone coordinating PORT_BASE bands by hand. A slot is taken when
 # the registry says so OR an existing env under ENV_PARENT already declares its
-# port in wp-config.php. The second source is the ground truth: it covers envs
-# made by earlier versions of this script (which kept slots under the repo) and
-# a registry entry that went missing, both of which handed out a live port once.
+# port: in wp-config.php (the env's own slot) or in a worktree's
+# .wp-env.override.json (a wp-env slot, see setup_wp_env). The second source is
+# the ground truth: it covers envs made by earlier versions of this script (which
+# kept slots under the repo) and a registry entry that went missing, both of
+# which handed out a live port once.
 allocate_slot() { # site name
   local key="${1}__${2}" slots="$ENV_PARENT/.wp-slots" lock used slot tries=0 cfg port
   mkdir -p "$slots"; lock="$slots/.lock"
-  until mkdir "$lock" 2>/dev/null; do (( ++tries < 50 )) || die "slot lock stuck ($lock)"; sleep 0.1; done
+  until mkdir "$lock" 2>/dev/null; do (( ++tries < 50 )) || die "slot lock stuck ($lock): another create is allocating a slot, or one died holding the lock (if no create/destroy is running, rmdir it and retry)"; sleep 0.1; done
   if [[ -f "$slots/$key" ]]; then slot=$(cat "$slots/$key"); else
     used=$(cat "$slots"/* 2>/dev/null || true)
     for cfg in "$ENV_PARENT"/*/wp-config.php; do
       port=$(sed -n "s/.*'WP_HOME', *'http:\/\/[^:']*:\([0-9]*\)'.*/\1/p" "$cfg" 2>/dev/null | head -1)
+      [[ -n "$port" ]] && used+=$'\n'$(( (port - PORT_BASE) / PORT_STRIDE ))
+    done
+    for cfg in "$ENV_PARENT"/*/wp-content/*/*/.wp-env.override.json; do
+      port=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$cfg" 2>/dev/null | head -1)
       [[ -n "$port" ]] && used+=$'\n'$(( (port - PORT_BASE) / PORT_STRIDE ))
     done
     slot=1
@@ -211,13 +232,217 @@ allocate_slot() { # site name
   fi
   rmdir "$lock" 2>/dev/null || true; echo "$slot"
 }
-free_slot() { # repo site name
-  rm -f "$ENV_PARENT/.wp-slots/${2}__${3}" "$1/.agent-env/wp-slots/$3"
+free_slot() { # repo site name  (the env's slot and every wp-env slot of its worktrees)
+  rm -f "$ENV_PARENT/.wp-slots/${2}__${3}" "$ENV_PARENT/.wp-slots/${2}__${3}__wpenv-"* "$1/.agent-env/wp-slots/$3"
 }
 
+# .wp-env.override.json is wp-env's own per-checkout local override, and what
+# setup_wp_env writes; most WP repos gitignore it already (Birdboar starters
+# ignore every dotfile), the exclude covers the ones that do not.
 exclude_artifacts() { # repo
   mkdir -p "$1/.git/info"
-  grep -qxF ".agent-env/" "$1/.git/info/exclude" 2>/dev/null || echo ".agent-env/" >>"$1/.git/info/exclude"
+  local e
+  for e in ".agent-env/" ".wp-env.override.json"; do
+    grep -qxF "$e" "$1/.git/info/exclude" 2>/dev/null || echo "$e" >>"$1/.git/info/exclude"
+  done
+}
+
+# ---- wp-env inside an env --------------------------------------------------
+# A worktree that carries .wp-env.json can boot its own Dockerised WordPress for
+# the repo's integration/e2e suite (that suite asserts against a clean, seeded
+# database, so it cannot target the env's copied site, and CI runs it in wp-env
+# too). Docker already keeps those stacks apart per checkout: wp-env names the
+# compose project after a hash of the config file's PATH, so two worktrees never
+# share containers or volumes. The one thing that collides is the host port,
+# 8888 (tests 8889) or whatever .wp-env.json pins, identical in every worktree.
+#
+# So each such worktree takes a slot of its own from the machine-wide pool and
+# the ports are pinned in a gitignored .wp-env.override.json, which wp-env reads
+# on EVERY command (start, run, stop, status, lifecycle scripts) ahead of
+# .wp-env.json and behind only the WP_ENV_PORT / WP_ENV_TESTS_PORT variables. The
+# tests are the project's side of the contract: they must read the same file
+# (references/wordpress.md, "Tests must read the port"); the warning below spots
+# the ones that hardcode the default instead.
+#
+# A separate slot rather than a wider PORTS_PER_ENV: the pool's slot math only
+# holds while every fork sharing ENV_PARENT uses one stride, an env with a
+# sibling needs a second pair anyway, and a registry file is respected by every
+# fork, propagated or not. The env's own slot (wp server) is untouched.
+
+# wp-env's per-checkout work directory (~/.wp-env/<name>): the compose file, the
+# WordPress download, and the name Docker derives the project from. Mirrors
+# @wordpress/env's load-config.js: the legacy opaque md5 of the config path when
+# that directory exists, else wp-env-<dir>-<8 hex>. Empty when never started.
+wp_env_work_dir() { # worktree
+  local wt home hash d
+  wt=$(cd "$1" 2>/dev/null && pwd -P) || return 0
+  home="${WP_ENV_HOME:-$HOME/.wp-env}"
+  hash=$(md5_str "$wt/.wp-env.json")
+  for d in "$home/$hash" "$home/wp-env-$(basename "$wt")-${hash:0:8}"; do
+    [[ -d "$d" ]] && { echo "$d"; return 0; }
+  done
+  return 0
+}
+
+# The port wp-env binds for a worktree OUTSIDE an env: .wp-env.json's port, else
+# wp-env's default. Only used to spot tests that hardcode it.
+wp_env_declared_port() { # worktree
+  python3 - "$1/.wp-env.json" <<'PY' 2>/dev/null || echo 8888
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+    print((c.get("env") or {}).get("development", {}).get("port") or c.get("port") or 8888)
+except Exception:
+    print(8888)
+PY
+}
+
+# Merge keys into a worktree's .wp-env.override.json, creating it if absent and
+# keeping whatever else it holds (a project_after_worktree may add its own keys
+# the same way, e.g. a config constant the suite needs). Tabs, like .wp-env.json.
+merge_wp_env_override() { # worktree json-object
+  python3 - "$1/.wp-env.override.json" "$2" <<'PY'
+import json, sys
+path, patch = sys.argv[1], json.loads(sys.argv[2])
+try:
+    cur = json.load(open(path))
+except Exception:
+    cur = {}
+def merge(a, b):
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(a.get(k), dict):
+            merge(a[k], v)
+        else:
+            a[k] = v
+merge(cur, patch)
+with open(path, "w") as f:
+    json.dump(cur, f, indent="\t")
+    f.write("\n")
+PY
+}
+
+# Give a worktree its wp-env ports. Appends "<rel>=<port>" to WPENV_PORTS (a
+# global, recorded in meta.env by create). No-op without .wp-env.json: an
+# override file alone counts as user config for wp-env and would switch off its
+# zero-config directory detection, so a repo that relies on that gets nothing
+# (and a note); pin a port in a committed .wp-env.json to opt in.
+WPENV_PORTS=""
+setup_wp_env() { # site name worktree rel
+  local site="$1" name="$2" wt="$3" rel="$4" slot port declared hits
+  if [[ ! -f "$wt/.wp-env.json" ]]; then
+    # package.json, not node_modules: this runs before the dependencies exist.
+    ! grep -q '"@wordpress/env"' "$wt/package.json" 2>/dev/null \
+      || say "$rel depends on @wordpress/env but has no .wp-env.json (zero-config mode); its wp-env keeps the default port and cannot run beside another env's; commit a .wp-env.json to opt in to a per-env port"
+    return 0
+  fi
+  (( PORTS_PER_ENV >= 2 )) || die "wp-env needs two ports per slot (development + tests); set PORTS_PER_ENV>=2 (and PORT_STRIDE to match)"
+  slot=$(allocate_slot "$site" "${name}__wpenv-$(sanitize "$rel")")
+  port=$((PORT_BASE + PORT_STRIDE * slot))
+  # Root-level AND environment-level keys: wp-env lets an env-level port in
+  # .wp-env.json beat a root-level override, so both spellings are pinned.
+  # autoPort off: the slot is the coordination; a busy port must fail loudly,
+  # not drift to a port the tests cannot predict.
+  merge_wp_env_override "$wt" \
+    "{\"port\":$port,\"testsPort\":$((port + 1)),\"autoPort\":false,\"env\":{\"development\":{\"port\":$port},\"tests\":{\"port\":$((port + 1))}}}" \
+    || die "could not write $wt/.wp-env.override.json"
+  WPENV_PORTS="${WPENV_PORTS:+$WPENV_PORTS }$rel=$port"
+  say "wp-env for $rel: http://localhost:$port (slot $slot, tests $((port + 1))), pinned in its .wp-env.override.json"
+  # Tests that hardcode the default port hit the WRONG stack in an env (or
+  # nothing), which reads as a code fault. Name them now, once, at create.
+  declared=$(wp_env_declared_port "$wt")
+  hits=$(grep -rIl --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=.git --exclude-dir=dist \
+           --exclude-dir=build --exclude-dir=test-results --exclude='*.md' -e "localhost:$declared" "$wt" 2>/dev/null \
+         | sed "s|^$wt/||" | head -5 | tr '\n' ' ' || true)
+  [[ -z "$hits" ]] \
+    || warn "$rel: these files hardcode localhost:$declared, its wp-env port outside an env; here wp-env listens on $port, so teach them to read .wp-env.override.json first (references/wordpress.md, 'Tests must read the port'): $hits"
+}
+
+# Reclaim a worktree's wp-env before its path is deleted: the stack holds Docker
+# mounts of it, and owns volumes plus a work dir under ~/.wp-env that nothing
+# else would ever clean up (each destroyed env used to leave one behind).
+# `cleanup --force` = down --volumes + rm the work dir, images kept for the next
+# boot; an older wp-env without it gets `stop`, and a note on what stays behind.
+teardown_wp_env() { # worktree
+  local wt="$1" work label out
+  [[ -f "$wt/.wp-env.json" ]] || return 0
+  work=$(wp_env_work_dir "$wt"); [[ -n "$work" ]] || return 0
+  label="${wt#"$AGENT_ENV_INSTALL/"}"
+  if [[ ! -x "$wt/node_modules/.bin/wp-env" ]]; then
+    warn "$label has a wp-env work dir ($work) but no node_modules/.bin/wp-env to reclaim it; remove it and the docker volumes named $(basename "$work")_* by hand"
+    return 0
+  fi
+  say "reclaiming wp-env of $label (containers, volumes, $work)"
+  out=$(mktemp)
+  if ! ( cd "$wt" && run_with_timeout 300 node_modules/.bin/wp-env cleanup --force ) >"$out" 2>&1; then
+    ( cd "$wt" && run_with_timeout 120 node_modules/.bin/wp-env stop ) >/dev/null 2>&1 || true
+    tail -3 "$out" >&2 || true
+    warn "wp-env cleanup failed for $label (older wp-env, or Docker down); its volumes ($(basename "$work")_*) and $work are left behind"
+  fi
+  rm -f "$out"
+}
+
+# Reclaim wp-env work dirs under ~/.wp-env whose env is gone. teardown_wp_env
+# covers the env being destroyed right now; this covers everything already lost:
+# envs destroyed by an older copy of this script (which knew nothing about
+# wp-env), a create that died mid-flight, a hand-deleted install. Each leftover
+# is a WordPress download plus a MariaDB volume that nothing else will ever
+# reclaim, and its compose project keeps answering `docker compose ls`.
+#
+# An orphan is a work dir that mounts at least one path under ENV_PARENT and
+# whose every mounted host path is now missing. That is deliberately strict: a
+# main checkout's stack always mounts a path that exists, so it can never match,
+# and a work dir for a checkout merely MOVED (nothing under ENV_PARENT) is left
+# alone rather than guessed at.
+#
+# Never fails the caller: Docker being down or a compose file being unreadable
+# leaves the work dir for the next run.
+sweep_orphan_wp_envs() { # [--dry-run]
+  local dry="" home work name compose mounts m alive envish removed=0
+  [[ "${1:-}" == "--dry-run" ]] && dry=1
+  home="${WP_ENV_HOME:-$HOME/.wp-env}"
+  [[ -d "$home" ]] || return 0
+  for work in "$home"/*/; do
+    work="${work%/}"; name=$(basename "$work")
+    compose="$work/docker-compose.yml"
+    [[ -f "$compose" ]] || continue
+    # Host paths this stack mounts, minus the ones inside the work dir itself
+    # (its own WordPress download, which exists exactly while the work dir does).
+    mounts=$(grep -oE "$HOME/[^:'\"]+" "$compose" 2>/dev/null | grep -vF "$work/" | sort -u || true)
+    [[ -n "$mounts" ]] || continue
+    alive=0; envish=0
+    while IFS= read -r m; do
+      [[ -e "$m" ]] && alive=1
+      [[ "$m" == "$ENV_PARENT/"* ]] && envish=1
+    done <<<"$mounts"
+    (( envish && ! alive )) || continue
+    if [[ -n "$dry" ]]; then
+      say "would reclaim orphaned wp-env $name (its env install is gone)"
+      removed=$((removed + 1)); continue
+    fi
+    say "reclaiming orphaned wp-env $name (its env install is gone)"
+    # -p explicitly: docker derives the project from the compose file's parent
+    # directory, but a COMPOSE_PROJECT_NAME in the environment would override
+    # that and point this `down` at somebody else's stack. Images are kept
+    # (shared across stacks, expensive to rebuild), volumes are not.
+    if run_with_timeout 300 docker compose -p "$name" -f "$compose" down --volumes --remove-orphans >/dev/null 2>&1; then
+      rm -rf "${work:?}"; removed=$((removed + 1))
+    else
+      warn "could not reclaim $name (is Docker running?); leaving $work in place"
+    fi
+  done
+  (( removed )) && say "${dry:+would reclaim }$removed orphaned wp-env stack(s)${dry:+ (dry run)}"
+  return 0
+}
+
+cmd_prune_wp_envs() {
+  local dry=""
+  case "${1:-}" in
+    --dry-run|-n) dry="--dry-run" ;;
+    "") ;;
+    *) die "unknown flag: $1 (usage: prune-wp-envs [--dry-run])" ;;
+  esac
+  sweep_orphan_wp_envs $dry
+  say "done"
 }
 
 # ---- dependency-sync git hooks (see agent-env.sh for the rationale) --------
@@ -365,14 +590,16 @@ provision_worktree_deps() { # main-checkout worktree-path rel
 # A sibling repo's CoW snapshot becomes a worktree of its main checkout on the
 # env branch, from whatever that checkout has checked out (announced, like the
 # target repo's default base).
-add_sibling_worktree() { # main-checkout worktree-path branch rel
-  local main="$1" wt="$2" branch="$3" rel="$4" sbase
+add_sibling_worktree() { # main-checkout worktree-path branch rel site name
+  local main="$1" wt="$2" branch="$3" rel="$4" site="$5" name="$6" sbase
   sbase=$(git -C "$main" rev-parse --abbrev-ref HEAD)
   say "sibling $rel: worktree on $branch from its checkout's current branch '$sbase'"
   [[ -z "$(git -C "$main" status --porcelain 2>/dev/null)" ]] \
     || warn "that checkout has uncommitted changes; the env branches from its last COMMIT"
   rm -rf "${wt:?}"
+  exclude_artifacts "$main"
   git -C "$main" worktree add "$wt" -b "$branch" "$sbase" --quiet
+  setup_wp_env "$site" "$name" "$wt" "$rel"
   provision_worktree_deps "$main" "$wt" "$rel"
 }
 
@@ -510,6 +737,8 @@ EOF
   rm -rf "${install:?}/$rel"
   git -C "$repo" worktree add "$install/$rel" -b "$branch" "$base" --quiet
   say "worktree: $install/$rel  (branch $branch from $base)"
+  # Before the dependencies: the pinned port must exist even if an install fails.
+  setup_wp_env "$site" "$name" "$install/$rel" "$rel"
 
   # Per-env database: copy the site's DB, point the env's wp-config at it.
   # ($db was resolved and collision-checked before the clone.)
@@ -549,8 +778,11 @@ EOF
 
   provision_worktree_deps "$repo" "$install/$rel" "$rel"
   for s in $siblings; do
-    add_sibling_worktree "$wproot/$s" "$install/$s" "$branch" "$s"
+    add_sibling_worktree "$wproot/$s" "$install/$s" "$branch" "$s" "$site" "$name"
   done
+  # The wp-env ports every worktree got (list reads it; destroy frees the
+  # slots by name prefix, so a create that died before this line leaks nothing).
+  echo "AGENT_ENV_WPENV_PORTS=\"$WPENV_PORTS\"" >>"$ed/meta.env"
 
   # Ensure the theme/plugin repo has the lockfile-reconcile git hooks (idempotent,
   # quiet). Best-effort: a hook-install hiccup must never fail create.
@@ -570,6 +802,10 @@ EOF
   for s in $siblings; do say "  sibling worktree:     $install/$s"; done
   say "  db:      $db"
   say "  serve:   agent-env-wp.sh serve $name   (-> http://$WEB_HOST:$web_port)"
+  local kv
+  for kv in $WPENV_PORTS; do
+    say "  wp-env:  ${kv%%=*} -> http://localhost:${kv#*=}   (node_modules/.bin/wp-env start, from that worktree)"
+  done
 }
 
 load_env() { # name -> sources meta.env
@@ -673,7 +909,7 @@ cmd_list() {
   local repo wpdir base; repo=$(repo_root "$PWD")
   base="$repo/.agent-env/wp"
   printf 'repo checkout: %s  [%s]\n\n' "$repo" "$(repo_state "$repo")"
-  printf '%-20s %-26s %-9s %-30s %s\n' "NAME" "BRANCH" "PORT" "DB" "SERVING"
+  printf '%-20s %-26s %-9s %-13s %-30s %s\n' "NAME" "BRANCH" "PORT" "WP-ENV" "DB" "SERVING"
   [[ -d "$base" ]] || return 0
   local ed name
   for ed in "$base"/*/; do
@@ -682,7 +918,9 @@ cmd_list() {
       # shellcheck disable=SC1091
       source "$ed/meta.env"
       serving=no; server_alive "$ed/web.pid" "$AGENT_ENV_WEB_PORT" && serving=yes
-      printf '%-20s %-26s %-9s %-30s %s\n' "$AGENT_ENV_NAME" "$AGENT_ENV_BRANCH" "$AGENT_ENV_WEB_PORT" "$AGENT_ENV_DB" "$serving"
+      # The wp-env ports of the env's worktrees (target first, then siblings).
+      wpenv=""; for kv in ${AGENT_ENV_WPENV_PORTS:-}; do wpenv="${wpenv:+$wpenv,}${kv#*=}"; done
+      printf '%-20s %-26s %-9s %-13s %-30s %s\n' "$AGENT_ENV_NAME" "$AGENT_ENV_BRANCH" "$AGENT_ENV_WEB_PORT" "${wpenv:--}" "$AGENT_ENV_DB" "$serving"
     )
   done
 }
@@ -735,6 +973,10 @@ cmd_destroy() {
       [[ "$suniq" == "0" ]] || die "'$name' has $suniq commit(s) only on $AGENT_ENV_BRANCH in sibling $s; push/merge them, or --force"
     done
   fi
+  # wp-env stacks first: Docker holds mounts of the worktrees about to go, and
+  # their volumes and ~/.wp-env work dirs are reclaimed here or never.
+  teardown_wp_env "$AGENT_ENV_INSTALL/$AGENT_ENV_REL"
+  for s in ${AGENT_ENV_SIBLINGS:-}; do teardown_wp_env "$AGENT_ENV_INSTALL/$s"; done
   say "dropping database $AGENT_ENV_DB"
   mysql -u root -h 127.0.0.1 -e "DROP DATABASE IF EXISTS \`$AGENT_ENV_DB\`" 2>/dev/null || warn "could not drop $AGENT_ENV_DB"
   git -C "$repo" worktree remove "$AGENT_ENV_INSTALL/$AGENT_ENV_REL" 2>/dev/null \
@@ -773,6 +1015,11 @@ cmd_destroy() {
   # Release the database-name claim so the name can be created again (the
   # second path is where versions before the shared pool kept it).
   rm -rf "${AGENT_ENV_DB:+$ENV_PARENT/.db-claims/$AGENT_ENV_DB}" "${AGENT_ENV_DB:+$repo/.agent-env/db-claims/$AGENT_ENV_DB}"
+  # Sweep wp-env stacks left behind by envs destroyed before this script
+  # reclaimed them (see sweep_orphan_wp_envs). Here rather than in a command
+  # nobody remembers to run: this is the moment an env's install disappears, so
+  # it is also the moment the check is guaranteed to be worth doing.
+  sweep_orphan_wp_envs
   say "destroyed '$name' (slot ${AGENT_ENV_SLOT:-?} freed)"
 }
 
@@ -786,5 +1033,6 @@ case "$cmd" in
   destroy) cmd_destroy "$@" ;;
   install-hooks) cmd_install_hooks "$@" ;;
   sync-deps) cmd_sync_deps "$@" ;;
+  prune-wp-envs) cmd_prune_wp_envs "$@" ;;
   *) sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

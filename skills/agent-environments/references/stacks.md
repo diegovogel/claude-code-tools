@@ -249,6 +249,20 @@ Then `serve` the env (API + the one web app the E2E suite targets is enough) and
 run `playwright test` against the env's port. With blocker 1 fixed, every env's
 dev server avoids the shared fixed port, so envs run E2E in parallel.
 
+**A test stack of its own that binds a fixed port** is blocker 1 in another
+coat: a WordPress repo's wp-env (`@wordpress/env`, Docker) binds 8888/8889 from
+every checkout, so the suite that drives it is serial across the machine even
+though Docker keeps each checkout's containers apart. The WordPress script
+handles this itself (a slot per worktree, pinned in that worktree's gitignored
+`.wp-env.override.json`, which wp-env reads on every command; see
+`references/wordpress.md`, "wp-env inside an env"). A standalone plugin repo on
+the generic engine gets the same result by hand: reserve two more ports in
+`PORTS_PER_ENV`, write `{"port": <p>, "testsPort": <p+1>, "autoPort": false}`
+into the worktree's `.wp-env.override.json` from `project_after_provision`
+(add the file to `.git/info/exclude`), and make the tests resolve the port the
+way wp-env does (`WP_ENV_PORT`, else the override, else `.wp-env.json`, else
+8888); the resolver snippets are in the same section.
+
 ## Stateful services
 
 This is the axis that most changes the work. The worked example has **no local
