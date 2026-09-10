@@ -79,6 +79,15 @@ URL_MODE="search-replace"
 # Lockfiles whose change in a pull triggers project_sync_deps (space-separated,
 # repo-root-relative). WP theme/plugin repos commonly carry both.
 LOCKFILES="composer.lock package-lock.json"
+# Additional paths whose change in a pull ALSO triggers project_sync_deps. An
+# entry ending in "/" matches anything beneath it; anything else is an exact
+# path, like LOCKFILES. Space-separated, repo-root-relative.
+#
+# For sources whose BUILD OUTPUT is gitignored -- compiled CSS is the usual case.
+# A lockfile is not the only thing a merge can invalidate: pull in an scss change
+# and the checkout serves CSS built from sources it no longer has, with nothing to
+# notice. e.g. SYNC_PATHS="scss/"
+SYNC_PATHS=""
 # Other custom repos in this install that every env should branch alongside this
 # one (space-separated, install-relative, e.g. "wp-content/plugins/my-plugin").
 # The canonical case is a custom theme plus a custom plugin: each repo's copy of
@@ -451,7 +460,8 @@ cmd_prune_wp_envs() {
 # env's PR) can't leave the repo's main checkout with a manifest listing a
 # dependency nobody installed. The hooks just call back into `sync-deps`, which
 # runs the per-project project_sync_deps — so a new setup only fills
-# project_sync_deps + LOCKFILES in the per-project config above.
+# project_sync_deps + LOCKFILES (and SYNC_PATHS, for sources whose build output
+# is gitignored) in the per-project config above.
 
 write_git_hook() {  # dest-path
   cat >"$1" <<'HOOK'
@@ -514,17 +524,22 @@ cmd_install_hooks() {
 # If a watched lockfile ($LOCKFILES) changed in the merge/pull/rebase that just
 # finished (ORIG_HEAD..HEAD), run project_sync_deps. Called by the git hooks.
 cmd_sync_deps() {
-  local root changed lf
+  local root changed p
   root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
   cd "$root"
   git rev-parse --verify --quiet ORIG_HEAD >/dev/null 2>&1 || return 0
   changed=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null) || return 0
-  for lf in $LOCKFILES; do
-    if grep -qxF -- "$lf" <<<"$changed"; then
-      say "lockfile changed in pull ($lf); reconciling dependencies via project_sync_deps..."
-      project_sync_deps
-      return 0
-    fi
+  # One pass over both lists: they differ in what they watch, not in what a hit
+  # means. An entry ending in "/" matches a whole subtree, anything else is an
+  # exact path.
+  for p in $LOCKFILES ${SYNC_PATHS:-}; do
+    case "$p" in
+      */) grep -q "^${p}" <<<"$changed" || continue ;;
+      *)  grep -qxF -- "$p" <<<"$changed" || continue ;;
+    esac
+    say "watched path changed in pull ($p); reconciling via project_sync_deps..."
+    project_sync_deps
+    return 0
   done
   return 0
 }

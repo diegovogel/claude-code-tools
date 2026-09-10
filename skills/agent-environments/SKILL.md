@@ -216,6 +216,17 @@ CLAUDE.md too. The reasoning:
   `--force`, and is then kept; the generic engine's `create <name> --resume`
   reattaches it, while the WordPress script refuses `create` until it is
   deleted or renamed by hand. Commits survive in the main repo's `.git` regardless.
+  - **A squash-merged PR trips this, and looks exactly like unmerged work.** The
+    guard counts commits by SHA, and squash-merging rewrites them, so a branch
+    whose content is fully in `main` still reports "N commit(s) only on
+    `<branch>`" — including for a *sibling* repo, whose merge state nobody
+    thought to check. Don't reach for `--force` on the message alone, and don't
+    assume the merge happened: `git -C <repo> fetch` (a stale `origin/main` is
+    the other cause of the same message), then prove the content landed with
+    `git -C <repo> diff --stat main..<branch>`. An **empty** diff means the work
+    is in `main` and only the SHAs differ, so `--force` loses nothing; it keeps
+    the branch, which you then delete by hand. A non-empty diff means real
+    unmerged work — stop and find out why.
 - **Never `git clean -fdx` at the main checkout root.** Envs are nested and
   gitignored, so `-x` would delete every one of them.
 - **Don't hand-rename env branches.** `provision` owns and enforces the canonical
