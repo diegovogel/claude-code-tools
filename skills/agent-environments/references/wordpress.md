@@ -348,6 +348,47 @@ Read the files rather than shelling out to `wp-env status --json` (the
 authoritative check, `.ports.development`): a container round-trip per request
 is what the theme's soft-skip probe already avoids on purpose.
 
+**That port is also what identifies the container, if a suite goes around
+`wp-env run cli` for speed.** Every `run cli` starts a *fresh* container: 0.64s
+measured, against 0.15s to `docker exec` into the one wp-env already keeps
+running. A PHP integration suite that shells out per assertion makes hundreds of
+those calls, so the difference is minutes, not milliseconds. Two rules make the
+shortcut safe, and both have teeth:
+
+- **Never match the container by name.** This is a hazard the slot scheme
+  creates: envs each run their own stack, and every one of those containers is
+  named `wp-env-<the same repo directory>-<hash>-cli-1`. A name match therefore
+  picks an arbitrary env, and the failure is the worst kind there is: the whole
+  suite runs against another branch's WordPress and *passes*. Match on the site URL
+  the container answers with, which is the one thing the pin makes unique, and
+  fall back to the binary when nothing matches. Assert the invariant in a test
+  (`get_option( 'siteurl' )` through whatever transport the suite uses, against
+  the resolver above), so a later "simplification" to name-matching fails loudly.
+- **Keep the readiness guards out of the per-test path.** A `beforeEach` that
+  asks whether wp-env is up and whether a plugin is active is two container round
+  trips before any test does any work. Memoise the *reason* rather than only the
+  success, so a broken environment is still re-reported to every test without
+  paying for the checks again. On a 105-test suite: 299s, then 150s once the
+  guards were memoised, then 69s once calls went through `docker exec`.
+
+```php
+// Identify, never guess. $expected is the resolver above.
+$names = shell_exec( 'docker ps --filter name=-cli-1 --format "{{.Names}}" 2>/dev/null' );
+foreach ( array_filter( array_map( 'trim', explode( "\n", (string) $names ) ) ) as $name ) {
+	$seen = shell_exec( 'docker exec ' . escapeshellarg( $name ) . ' wp option get siteurl 2>/dev/null' );
+	if ( trim( (string) $seen ) === $expected ) { return $name; }
+}
+return null; // use the wp-env binary
+```
+
+**Parallelising the suite is not the next win.** Measured on a 137-test WordPress
+suite with 12 cores: `pest --parallel` cut 90s to 53s *and failed 9 tests*. Both
+halves have one cause. Every worker shares the single wp-env WordPress and its
+MariaDB, so they contend (hence the modest speedup, unlike a Laravel suite where
+each worker gets its own database) and they collide on real state. Making it
+sound needs per-worker database isolation, which is ongoing maintenance for a
+suite that is already a minute. Flaky is more expensive than slow.
+
 **Zero-config repos get nothing.** A repo that relies on wp-env inferring
 "this directory is a plugin" has no `.wp-env.json`, and an override file alone
 counts as user config and switches that inference off, so `create` writes
