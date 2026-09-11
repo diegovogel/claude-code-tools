@@ -22,6 +22,19 @@ Once preconditions pass, proceed to Phase 2.
 
 Run up to **7 cycles**. Each cycle invokes `/codex:review` and acts on its findings.
 
+### Step 0: Classify the branch, once
+
+Before the first cycle, decide whether this is **critical work** and tell the user in one line, with the reason. Critical means the diff changes what happens in any of these:
+
+- **Money**: anything that decides, computes, stores or transmits an amount someone is charged or paid — prices, totals, payment feeds, gateways, refunds.
+- **Personal data**: collecting, storing, exporting, logging or emailing PII — a name with contact details, an address, card or bank details, a government id, health data.
+- **Security boundaries**: authentication, sessions, permission and capability checks, nonces, secrets and keys, input trust decisions, anything that widens what an unauthenticated or lower-privileged actor can reach.
+- **Irreversible operations**: permanent deletion, migrations or backfills that rewrite existing records, bulk sends to real recipients, schema changes that drop or narrow data.
+
+Judge by what the change *does*, not which files it touches: a CSS change on a checkout page is not critical; a one-line change to how a total is rounded is. When a money or security question is a coin flip, it is critical. Docs, tooling, tests-only changes and pure refactors are not. State the classification even when it is "not critical", so the user can overrule it in a word.
+
+Heuristics worth a grep of the diff before deciding: `price|amount|total|charge|payment|refund|feed`, `delete|destroy|truncate|drop|purge`, `password|token|secret|nonce|capability|current_user_can|permission`, `email|phone|address|ssn|card`, `migrat|backfill`. A hit is a reason to look, not a verdict.
+
 ### Step 1: Launch Codex review
 
 Invoke the upstream `codex-companion.mjs` script via `Bash` with `run_in_background: true` (or foreground if the user passed `--wait` to `/review-with-codex`):
@@ -31,6 +44,8 @@ node "$(ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-compani
 ```
 
 The glob + `ls -t | head -1` picks up the currently-installed Codex plugin version automatically, so version bumps don't break this skill.
+
+**Effort and model.** A normal cycle runs at whatever `~/.codex/config.toml` sets for `model_reasoning_effort` (expected `medium`) on the catalog's default model (Astra, left unpinned). The companion's `review` takes `--model` but has no `--effort`: `codex app-server` reads that file once, at its own start, and the companion keeps one app-server per workspace alive as a "broker" and reuses it while it answers. So a cycle that must run at a different effort cannot just edit the config; it goes through `~/.claude/scripts/review-with-codex/review-at.sh`, which tears the workspace's broker down, sets the effort, runs the review, and restores both on exit. Measured 2026-09-11: reviews launched that morning ran at the effort a broker had loaded the previous afternoon. The only cycle that uses the wrapper is the **final pass** for critical work (Step 3).
 
 **Always pass `--scope branch --base main` explicitly.** Without those flags the reviewer defaults to `--scope auto`, which picks up the working-tree diff first and will review only your uncommitted changes (typically unrelated ambient-tool churn) instead of the branch commits we came here to review. This produces a confident "no findings" on the wrong diff and has bitten this skill multiple times. If the branch is based on something other than `main`, substitute the right base — but set it explicitly, don't trust the default.
 
@@ -56,7 +71,15 @@ Read the output file path from the notification (or use the Skill tool's direct 
 
 Parse the findings as follows:
 
-- **No findings**: if the review text indicates no concerns ("no issues", "looks good", "no findings", or similar), the branch is clean. Say so and proceed to **Phase 3: Create PR** below.
+- **No findings**: if the review text indicates no concerns ("no issues", "looks good", "no findings", or similar), the branch is clean *at this effort*. If the branch is **critical** (Step 0) and no high-effort pass has run yet, it is not done: the next cycle is the **final pass**, launched through the wrapper instead of the plain command —
+
+  ```bash
+  ~/.claude/scripts/review-with-codex/review-at.sh high --model gpt-5.6-sol
+  ```
+
+  Background, like any cycle; its stdout is the companion's output verbatim, so Step 3 reads it the same way. Findings from a final pass are addressed like any other cycle's, and the cycle after that is another final pass at the same setting, until one comes back clean or the cap is reached. Once a high-effort pass is clean, or the branch is not critical, say so and proceed to **Phase 3: Create PR** below.
+
+  Why medium for the loop and high only at the end: on 2026-09-11, three single-pass reviews of one commit at Astra-low, Astra-medium and Sol-high each found two real bugs with no false positives, but only the high pass surfaced a P1 (the payment feed amount) and only it questioned a documented design assumption, which turned out to be a real charge-at-a-posted-price hole. Medium is the right default; the last pass on critical work is where high earns its cost, at roughly three times the turns. That test could not separate Sol-high from Astra-high; the benchmarks favour Astra at equal effort, so `--model gpt-6-astra` is the one-word alternative.
 - **One or more findings**: each finding typically includes a severity tag (P1/P2), a file:line reference, a description, and a recommendation. Quote the findings verbatim, then proceed to "Addressing feedback" below.
 - **Unparseable or ambiguous output**: if the review text doesn't clearly convey findings or no-findings, show the raw output to the user and ask how to proceed.
 
@@ -107,7 +130,7 @@ This applies once you've made the same push-back twice. A finding that was raise
 
 ## Phase 3: Create PR
 
-Triggered only when a cycle returns no findings (at any cycle count up to 5). Do NOT run this phase if cycles hit the cap with findings still present.
+Triggered only when a cycle returns no findings within the cap — and, for critical work, only once that clean cycle is a high-effort final pass (Step 3). Do NOT run this phase if cycles hit the cap with findings still present.
 
 Follow your standard PR-creation workflow from your system prompt's "Creating pull requests" section. Do NOT duplicate those instructions here — use the built-in workflow verbatim (status/diff/log in parallel, draft title + body, push the branch if needed, run `gh pr create` with a HEREDOC body, return the PR URL).
 
