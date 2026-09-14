@@ -912,11 +912,15 @@ fall back to another file with the same module id, and the 8.3 image's
 `ACCEPT_MODULE_LICENSES`/`ACCEPT_MODULE_CERTS` do not appear in that
 entrypoint, and the 8.3 Docker Image docs page does not document them.
 
-**Fix:** install/upgrade the module through the Gateway UI so the registry
-points at the current file (documented install flow; not yet re-verified on
-this failure), or keep third-party `.modl` filenames stable across image
-rebuilds. To spot it on a reused or moved volume, compare
-`docker exec <gw> cat data/modules.json` with `docker exec <gw> ls user-lib/modules`.
+**Fix:** install/upgrade the module through the Gateway UI (Platform > System >
+Modules > Install or Upgrade Module), then restart the gateway. Verified
+2026-09-14: afterwards `modules.json` pointed at
+`data/var/ignition/modl/<file>.modl` (inside the data volume, so it survives
+image rebuilds) and the log showed `Starting up module '<module id>'`.
+Alternatively keep third-party `.modl` filenames stable across image rebuilds.
+To spot it on a reused or moved volume, compare
+`docker exec <gw> cat data/modules.json` with the files in `user-lib/modules`
+and `data/var/ignition/modl`.
 _Discovered: 2026-09-14_
 
 ### `MigrationLog` ERRORs on every boot are benign when they are `CREATE conflict: ... already exists`
