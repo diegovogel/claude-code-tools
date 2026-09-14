@@ -62,7 +62,7 @@ bound, near-zero disk until divergence). The source install and DB are never tou
 WordPress has no `artisan serve`. Use **`wp server`** (WP-CLI's wrapper around PHP's
 built-in server), which binds an explicit port, matching the slot scheme. **You
 MUST run it with `PHP_CLI_SERVER_WORKERS` > 1.** `php -S` is single-threaded, and a
-WordPress page load fires loopback HTTP requests (wp-cron, Site Health) to itself;
+WordPress page load fires loopback HTTP requests (Site Health, and wp-cron where it is on) to itself;
 with one worker the first request waits on a second the server can't accept, and it
 **deadlocks**. The script sets `PHP_CLI_SERVER_WORKERS=4` (CONFIG `WP_SERVER_WORKERS`).
 This was the single hardest WP bug to find: serve appeared to "hang" while the
@@ -118,6 +118,32 @@ handful of URLs can remain after search-replace: the skipped guids, and
 **escaped-slash JSON** (`http:\/\/host`) inside serialized page-builder data. If you
 need those too, add a third pass replacing the escaped form. In practice the env
 renders fine without it.
+
+## WP-Cron is off in every env
+
+`create` sets `DISABLE_WP_CRON` to true in the env's wp-config. The cloned database
+carries the source site's scheduled events, usually overdue by the time an env exists,
+and the connections those jobs use: a production mail transport, a live payment
+gateway's OAuth tokens, third-party API keys. With cron on, the env's first page load
+would run all of them from a copy.
+
+Page loads are not the only trigger. Since WordPress 6.9, `wp_cron()` hooks
+`_wp_cron()` to `shutdown`, which WP-CLI fires too, so **any `wp` command that loads
+WordPress spawns the site's overdue cron when it exits**, against the site's own URL.
+That includes `create`'s one WordPress-loading call against the source install,
+`wp option get siteurl`, which therefore passes
+`--exec='define( "DISABLE_WP_CRON", true );'`. `--exec` runs before wp-config.php
+loads, so that definition wins. Commands that do not load WordPress (`wp db ...`,
+`wp config ...`) need nothing. Verified on WP 7.1 by intercepting `pre_http_request`:
+the bare call spawned cron, and the same call with the constant defined did not.
+
+**When the task is about cron**, run events directly first: `wp cron event list` and
+`wp cron event run <hook>` or `--due-now` work with the constant set and need no
+spawning. Only a task about spawning itself should turn cron back on, for that env
+alone, with `wp config set DISABLE_WP_CRON false --raw --path=<env install>`. Check
+what the due events call before doing that, because they run with the source site's
+credentials. An env created before this default has no constant; add it with the same
+command and `true`.
 
 ## `--skip-themes --skip-plugins` on DB-level wp calls
 

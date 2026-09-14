@@ -16,6 +16,11 @@
 # wp-env ports of its own from the same slot pool, pinned in a gitignored
 # .wp-env.override.json, so every env can run its suites concurrently.
 #
+# WP-Cron is off in every env: create sets DISABLE_WP_CRON in the env's wp-config,
+# because the cloned database carries the source site's overdue events and the
+# mail, payment and API credentials those jobs use. A task that is about cron turns
+# it back on for its own env; see references/wordpress.md.
+#
 # Usage:
 #   agent-env-wp.sh create <name> [base-ref]   # clone install + worktree(s) + DB + config + wp-env ports
 #   agent-env-wp.sh run <name> -- <cmd...>     # run a command IN the env's worktree, cwd-independent
@@ -773,9 +778,13 @@ EOF
   # URL: override always; optional full search-replace for self-containment.
   "$WP" config set WP_HOME "http://$WEB_HOST:$web_port" --type=constant --path="$install" >/dev/null
   "$WP" config set WP_SITEURL "http://$WEB_HOST:$web_port" --type=constant --path="$install" >/dev/null
+  # Before anything loads WordPress in the env: WP-CLI spawns overdue cron when it
+  # exits, and the copied events would run with the source site's credentials.
+  "$WP" config set DISABLE_WP_CRON true --raw --type=constant --path="$install" >/dev/null
   if [[ "$URL_MODE" == "search-replace" ]]; then
-    # `|| true` so a failure here can't abort create under set -e.
-    srcurl=$("$WP" option get siteurl --skip-themes --skip-plugins --path="$wproot" 2>/dev/null || true)
+    # `|| true` so a failure here can't abort create under set -e. --exec runs
+    # before wp-config.php loads, so this call cannot spawn the SOURCE site's cron.
+    srcurl=$("$WP" option get siteurl --skip-themes --skip-plugins --exec='define( "DISABLE_WP_CRON", true );' --path="$wproot" 2>/dev/null || true)
     host="${srcurl#*://}"; host="${host%%/*}"
     if [[ -n "$host" ]]; then
       say "search-replace $host -> http://$WEB_HOST:$web_port (DB only; media files untouched)"
@@ -816,6 +825,7 @@ EOF
   say "  worktree (edit here): $install/$rel"
   for s in $siblings; do say "  sibling worktree:     $install/$s"; done
   say "  db:      $db"
+  say "  wp-cron: off; a cron task re-enables it: $WP config set DISABLE_WP_CRON false --raw --path=$install"
   say "  serve:   agent-env-wp.sh serve $name   (-> http://$WEB_HOST:$web_port)"
   local kv
   for kv in $WPENV_PORTS; do
