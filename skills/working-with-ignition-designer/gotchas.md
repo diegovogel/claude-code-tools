@@ -875,6 +875,61 @@ IdP uses) in the IdP's `config.json`, or give the user an email contactInfo.
 When hunting these, grep system_logs for logger `IdentityProvider` — filters
 like `%idp%`/`%uth%` miss that logger name entirely. _Discovered: 2026-08-05_
 
+### Moving a Docker gateway to a new machine: carry the data volume, not just the repo
+The JDBC ciphertext key lives in the gateway data volume (see "JDBC encrypted
+passwords are per-gateway-key"), so a new laptop with a fresh clone cannot
+decrypt the committed passwords. Carry the volume across instead:
+
+```bash
+# old machine (gateway stopped for a consistent copy)
+docker stop -t 60 <gw> && docker run --rm -v <gw-volume>:/data:ro -v "$HOME/migration:/backup" ubuntu:22.04 tar czf /backup/gw-data.tgz -C /data . ; docker start <gw>
+# new machine, BEFORE the first `docker compose up` (an empty volume starts a blank gateway)
+docker volume create <gw-volume>
+docker run --rm -v <gw-volume>:/data -v "$HOME/migration:/backup:ro" ubuntu:22.04 bash -c 'cd /data && tar xzpf /backup/gw-data.tgz --same-owner'
+```
+
+Verified 2026-09-14 between two Macs: live JDBC sessions on first boot, no
+decrypt faults, no git diff. The official image keeps logs outside `data/`, so
+the tarball stays small (~180 MB). The trial clock travels with it too: the
+moved gateway came up already showing Perspective "Trial Expired". Check
+`data/modules.json` afterwards (next entry). _Discovered: 2026-09-14_
+
+### Third-party modules are pinned by FILENAME in `data/modules.json`; a newer `.modl` in a rebuilt image is silently skipped
+**Symptom:** a gateway started on an existing data volume after the derived
+image was rebuilt with a different third-party `.modl` version logs
+`WARN gateway.ModuleManager: The file for module '<module id>' is missing and
+will not be loaded`, and there is no `Starting up module '<module id>'` line.
+Nothing else complains; the module's features are simply absent. Seen with
+Integration Toolkit (`com.automation_pros.simaids`): the volume pinned
+`Integration Toolkit-2.1.4.260821836-v83.modl`, the rebuilt image only had the
+2.1.5 file.
+
+**Root cause:** `data/modules.json` records each registered module's absolute
+`filename`, `certFingerprint` and `licenseAgreementHash`. The gateway does not
+fall back to another file with the same module id, and the 8.3 image's
+`docker-entrypoint.sh` does no module registration at all (it only sets
+`-Dignition.gateway.externalModulesFolder=data/var/ignition/modl`).
+`ACCEPT_MODULE_LICENSES`/`ACCEPT_MODULE_CERTS` do not appear in that
+entrypoint, and the 8.3 Docker Image docs page does not document them.
+
+**Fix:** install/upgrade the module through the Gateway UI so the registry
+points at the current file (documented install flow; not yet re-verified on
+this failure), or keep third-party `.modl` filenames stable across image
+rebuilds. To spot it on a reused or moved volume, compare
+`docker exec <gw> cat data/modules.json` with `docker exec <gw> ls user-lib/modules`.
+_Discovered: 2026-09-14_
+
+### `MigrationLog` ERRORs on every boot are benign when they are `CREATE conflict: ... already exists`
+A gateway whose volume still carries a pre-8.3 `data/db/config.idb` retries
+the legacy tables `WSQUEUE_OVERRIDES`, `WS_PROXYRULES` and `STARTERSTEPS` on
+every start. Each attempt throws `PushConflictException: CREATE conflict:
+'ResourceId{resourcePath=ignition/gateway-network-queue-settings, ...}' already exists`
+(and the proxy-rules / quickstart equivalents), logs 3 ERRORs from
+`...config.migration.MigrationLog`, and writes a fresh
+`config/resources/migration-log-<timestamp>.md`. All 27 migration logs from one
+dev gateway reported the same three conflicts. Only dig in when the error text
+is something other than a CREATE conflict. _Discovered: 2026-09-14_
+
 ### Gateway scan endpoint
 For the propagation workflow (see Workflow rules → "Two cache layers"), the
 scan endpoint is:
