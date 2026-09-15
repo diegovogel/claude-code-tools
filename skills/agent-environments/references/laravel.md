@@ -110,10 +110,27 @@ project_env_port_lines() {
 # there's no fixed-address takeover. Echo nothing.
 project_main_ports() { :; }
 
+# Herd's PHP finds its php.ini through HERD_PHP_<ver>_INI_SCAN_DIR, which the
+# user's shell exports but an agent's Bash session does not have. Without it the
+# served PHP loads no ini at all and runs on built-in defaults (2M uploads, 8M
+# POST bodies) instead of Herd's, so file uploads over 2 MB fail in an env that
+# an agent started while the same code works on the Herd site. `artisan serve`
+# passes the variable through to its `php -S` child. No-op without Herd.
+project_herd_php_ini() {
+  local version var dir
+  version="$(php -r 'echo PHP_MAJOR_VERSION.PHP_MINOR_VERSION;')"
+  var="HERD_PHP_${version}_INI_SCAN_DIR"
+  dir="$HOME/Library/Application Support/Herd/config/php/$version/"
+  if [[ -z "${!var:-}" && -d "$dir" ]]; then
+    export "$var=$dir"
+  fi
+}
+
 # --- launch: artisan serve (web) + Vite (assets) + queue worker (if not sync)
 project_start_servers() {
   local env="$1" web_port="$2" vite_port="${3:-}"
   cd "$env"
+  project_herd_php_ini
   php artisan serve --host=127.0.0.1 --port="$web_port" >>logs/web.log 2>&1 &
   echo $! >.agent-env/web.pid
   if [[ -f package.json && -n "$vite_port" ]]; then
@@ -197,6 +214,14 @@ project_pre_destroy() {
   `.env.example` (the guard `grep -q '^APP_KEY=base64:'` handles this).
 - **Herd MySQL is TCP-only here.** Connect via `-h 127.0.0.1 -P 3306`, the default
   socket `/tmp/mysql.sock` isn't where Herd puts it.
+- **Herd's php.ini is not loaded from an agent's shell.** Herd's `php` locates its
+  ini via `HERD_PHP_<ver>_INI_SCAN_DIR`, exported by the user's `~/.zshrc` and
+  absent from Claude Code's Bash. A server started without it runs on PHP's
+  built-in limits (`upload_max_filesize=2M`), so uploads over 2 MB fail in the env
+  but work on the Herd site, which looks like an app bug. `project_herd_php_ini`
+  (above) exports the variable before `serve`; check with
+  `php -r 'echo ini_get("upload_max_filesize");'` from the same shell. Hit in
+  resume-creator on 2026-09-14.
 - **`migrate --seed` is for a *fresh* per-env DB.** That's the case here (new
   schema / new sqlite file). Don't point an env at a shared/populated DB.
 - **SQLite path is pinned per env** (`DB_DATABASE=database/database.sqlite` in
