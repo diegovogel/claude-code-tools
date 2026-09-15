@@ -24,13 +24,19 @@ Run up to **7 cycles**. Each cycle invokes `/codex:review` and acts on its findi
 
 ### Step 1: Launch Codex review
 
-Invoke the upstream `codex-companion.mjs` script via `Bash` with `run_in_background: true` (or foreground if the user passed `--wait` to `/review-with-codex`):
+Invoke the upstream `codex-companion.mjs` script via `Bash`, in two calls. First resolve the installed plugin version (the glob plus `ls -t | head -1` picks up the current one, so version bumps don't break this skill):
 
 ```bash
-node "$(ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | head -1)" review --scope branch --base main
+ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | head -1
 ```
 
-The glob + `ls -t | head -1` picks up the currently-installed Codex plugin version automatically, so version bumps don't break this skill.
+Then launch the review with that path written out literally, with `run_in_background: true` (or foreground if the user passed `--wait` to `/review-with-codex`):
+
+```bash
+node /Users/diego/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs review --scope branch --base main
+```
+
+Two calls rather than one `node "$(ls -t ...)"`, because the pre-PR workflow runs this from inside a worktree the session entered with `EnterWorktree`, and the runtime's Bash vetting there refuses command substitution outright. Sessions were quietly typing the path by hand to get past it; a plain pipe and a literal path both pass.
 
 **Effort and model.** Every cycle runs at the `model_reasoning_effort` that `~/.codex/config.toml` sets (medium), on the catalog's default model, which stays unpinned so reviews follow the newest one. Don't pass `--model`, and don't change the effort between cycles. (A high-effort final pass on another model was tried and dropped as too fragile.)
 
