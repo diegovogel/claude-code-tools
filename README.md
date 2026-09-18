@@ -15,14 +15,14 @@ Some tools require additional dependencies as noted in their details below.
 ## Tool List
 
 ### Commands
-* [start-todoist-task](#command-start-todoist-task): fetches task details and creates a plan to complete it.
+* [start-todoist-task](#command-start-todoist-task): fetches task details, creates a plan, and has Codex review the plan before I see it.
 * [manual-qa](#command-manual-qa): creates a comprehensive manual QA procedure and walks through it with me.
 * [review-with-codex](#command-review-with-codex): Claude goes through several rounds of review with Codex.
 * [session-wrapup](#command-session-wrapup): finds valuable information in a session and saves it for future reference by Claude.
 
 ### Skills
 * [Ignition Designer](#skill-working-with-ignition-designer): a collection of tips and workflows that improve Claude's ability to build and debug [Ignition Perspective](https://inductiveautomation.com/ignition/modules/perspective) projects.
-* [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments.
+* [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments, and defines the quality workflow Claude runs in one before a PR.
 * [brainstorm-with-panel](#skill-brainstorm-with-panel): a phased, multi-agent workflow for generating and evaluating creative solutions to hard problems.
 * [security-review-plus](#skill-security-review-plus): runs a security review that includes a curated checklist of security tips from the excellent [Securing Laravel](https://securinglaravel.com/) newsletter from [Stephen Rees-Carter](https://stephenreescarter.net/) (go sign up!).
 
@@ -37,17 +37,21 @@ Some tools require additional dependencies as noted in their details below.
 
 **Why it exists:** I track all my dev work (and most of my life) in Todoist. After gathering requirements and doing preliminary research, I put a detailed spec in each task description. Rather than constantly repeating myself or copy-pasting, I can simply run this command and paste the task link. I created this for Todoist because that's what I happen to use, but it can be easily modified to work with Linear, Jira, or any other task manager with a CLI or API.
 
-**What it does:** gathers full context by fetching the parent task, all sub-tasks (recursively), every comment on every task, and any image attachments. Then it briefs the Explore subagent on what the task is asking for and what areas of the code it likely affects, reads the suggested starting points itself, asks clarifying questions if anything is genuinely ambiguous, and presents a plan.
+**What it does:** gathers full context by fetching the parent task, all sub-tasks (recursively), every comment on every task, and any image attachments. Then it briefs the Explore subagent on what the task is asking for and what areas of the code it likely affects, reads the suggested starting points itself, asks clarifying questions if anything is genuinely ambiguous, and writes a plan. Before showing me the plan, it has Codex review it (read-only), checks each of Codex's findings against the code, and folds in the ones that hold up.
 
 **Highlights:**
 * Auto-mode override: even in auto mode (which is meant to minimize interruptions), the command pauses to ask clarifying questions when needed. The cost of building the wrong plan is higher than a short Q&A round.
 * Uses Plan Mode rather than printing the plan to the chat, so I can easily comment on specific parts of the plan.
+* The plan leads with what I actually need to decide: the goal and approach, assumptions, questions asked, trade-offs made without me, risks, user-facing copy, and open questions. Technical details come after, because reviewing those is Codex's job.
+* Codex reviews the whole plan but is told not to skim the testing plan: every proposed test has to be able to fail when the behavior it guards breaks. No smoke tests, no testing for the sake of testing.
+* Claude verifies every Codex finding before acting on it. The plan records what was accepted and what was rejected and why, and Codex's raw output is saved next to the plan file.
 * Optional `[short summary]` arg gets woven into the first sentence of Claude's reply so Claude Code's session auto-titler picks up something useful instead of a generic title.
 * Reads project `MEMORY.md` before exploring, so it doesn't ask questions the project memory already answers.
 * Detects if the project supports parallel agent environments and creates an isolated environment for implementing the plan if supported, otherwise works in the main worktree.
 
 **Dependencies:**
 * Todoist CLI.
+* Codex CLI and the Codex plugin for Claude Code, for the plan review.
 
 ### Command: `manual-qa`
 
@@ -138,6 +142,7 @@ The skill also self-improves: when Claude hits a new gotcha that meets the inclu
 * Tested against 11 real codebases representing 7 tech stacks. 
 * WordPress gets a dedicated flow, because there my repos are usually a single theme or plugin rather than the whole site. The environment clones the entire WordPress install and swaps the repo in as a worktree.
 * Wired into my other tools: `start-todoist-task` implements its plan inside a fresh environment, and `manual-qa` serves the one tied to the current session.
+* Defines the pre-PR workflow Claude runs inside an environment once the code works: run the tests and build, prove every new test can fail by breaking what it protects and watching it go red, then `/simplify`, a security review when warranted, `/manual-qa`, `/review-with-codex`, and a re-check after Codex. It commits and pushes as it goes and stops at the PR, which is my call.
 
 **Dependencies:**
 * A copy-on-write-capable filesystem for the speed benefit (APFS on macOS, btrfs or xfs on Linux). It still works without one, just with a slower full copy.
