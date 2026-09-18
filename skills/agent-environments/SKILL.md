@@ -307,6 +307,16 @@ step 7 still carries the full record.
    checkout (clean, on `main`) and returned a confident "no findings" over
    an empty diff.
 1. **Verify** — the env's own test + build commands, via `run <name> -- <cmd>`.
+   Then prove every **new or changed test can fail**: for each one, break the
+   behaviour it guards (comment out the check, or revert the branch it
+   exercises), run that test alone, confirm it fails for that reason, restore
+   the code and run it green again. Tests that share one guard can be checked
+   in one pass. A test that stays green with its guard removed is not a test:
+   rework it or drop it now, before anything downstream reviews it. The only
+   tests exempt are ones that pin a type or a shape a type-checker already
+   guards; name them in the report. Never commit the broken state, and confirm
+   `git diff` shows none of it before step 2. Record each test checked and
+   each one reworked or dropped for the step 7 report.
 2. **`/simplify`** — quality cleanup of the diff (reuse, dead code, altitude).
 3. **`/security-review-plus`** — *if warranted*. It's cheap, so the bar is low:
    run it whenever anything remotely security-relevant was touched (auth, input
@@ -336,7 +346,9 @@ step 7 still carries the full record.
    steps 2–6 listed by name, in order, each with a one-or-two-line summary of
    what it found and what changed, or "skipped" plus the reason. All five
    lines appear every time, so a step that didn't run is visibly skipped
-   rather than silently absent. Then wait for the user.
+   rather than silently absent. Above them, one line for step 1's can-fail
+   check: how many tests were proven able to fail, and which were reworked,
+   dropped or exempted. Then wait for the user.
 
 **Projects override these defaults.** A project's CLAUDE.md is authoritative: it
 can pin which steps apply and how — e.g. "`/manual-qa` here must be user-driven
