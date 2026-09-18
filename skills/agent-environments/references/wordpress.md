@@ -3,9 +3,14 @@
 WordPress is the documented exception to the engine's "the git repo is the
 runnable project" model. Here the repo is a **theme or plugin nested in
 `wp-content/`**, but a runnable env needs the **whole WordPress install**. So WP
-gets its own script, [`assets/agent-env-wp.sh`](../assets/agent-env-wp.sh), which
+gets its own engine, [`assets/agent-env-wp.sh`](../assets/agent-env-wp.sh), which
 reuses the engine's primitives (slot/port registry, the `unique_commits` destroy
-guard, pid/health machinery, CoW clone) but with a WP-specific flow.
+guard, pid/health machinery, CoW clone) but with a WP-specific flow. It is wired
+like the generic one: the repo tracks a `scripts/agent-env-wp.sh` shim (rendered
+from `assets/shim.sh` with `__ENGINE__` = `agent-env-wp.sh`), and the repo's
+config lives at `~/.claude/agent-environments/<repo>/project.sh`, started from
+[`assets/project-wp.example.sh`](../assets/project-wp.example.sh); `PORT_BASE` is
+the one required value, everything else has an engine default.
 
 **Run it from the theme/plugin repo's main checkout**; it finds the enclosing WP
 install automatically. `destroy` refuses to run from inside the env it would delete.
@@ -26,6 +31,7 @@ common ones; check the CLAUDE.md):
 | `scripts/agent-env-wp.sh install-hooks` | (Re)install the dependency-sync git hooks; `create` does this itself |
 | `scripts/agent-env-wp.sh sync-deps` | What those git hooks call after a pull changed a lockfile |
 | `scripts/agent-env-wp.sh prune-wp-envs [--dry-run]` | Reclaim wp-env stacks left by envs that no longer exist; `destroy` runs this itself |
+| `scripts/agent-env-wp.sh guard` | Answered by the shim without the engine: exits 1 inside any env worktree (`.git` is a file there), 0 at the main checkout. Wire it as the first step of the script that binds the fixed asset port: `"dev": "./scripts/agent-env-wp.sh guard && bin/dev"` |
 
 `run` and `serve` refuse an env whose `create` did not finish (its wp-config may
 still name the source database); `destroy` and `list` accept it.
@@ -71,6 +77,16 @@ server was actually listening but unable to answer.
 Herd still provides the toolchain (`php`, `composer`, `wp`, `mysql`) and runs the
 shared MySQL. We just don't use Herd as the per-env web server (it's domain-based on
 :80 and can't run N parallel copies of one site on distinct ports).
+`node`/`npm` are NOT part of that toolchain: the engine prepends Herd's bin,
+Homebrew and `/usr/local/bin` to PATH, but node comes from nvm, whose bin dir only
+the interactive shell adds. Every hook that calls npm (a `project_after_worktree`
+build step, `project_sync_deps`) therefore inherits the caller's PATH: present in
+Claude's Bash and a terminal, absent from a GUI git client firing the post-merge
+hook, where `npm install` fails with "command not found". A config that must work
+there appends nvm's node bin at top level (a `_path_append`, the pattern
+walkingman's config uses for Herd). Proof under a bare PATH:
+`env -i HOME="$HOME" PATH=/usr/bin:/bin ./scripts/agent-env-wp.sh list` must
+succeed, and node/npm are expected to be missing there.
 
 ## Asset watchers: run them manually
 
@@ -78,10 +94,13 @@ The script deliberately does **not** auto-start the theme/plugin's `watch`/`dev`
 script during `serve`. Real WP themes commonly wire `npm run watch` to **browser-sync**
 (via `concurrently`), which: binds a fixed port (3000, collides across envs), tries
 to open a browser, and **holds the parent process's stdout open so `serve` never
-returns**. If you're actively editing CSS/JS, run the watcher yourself in the
-worktree (`cd <install>/wp-content/themes/<theme> && npm run watch`), accepting that
-browser-sync isn't suited to running unattended across parallel envs. A plain
-compile step (`npm run compile:css`, `npm run bundle`, etc.) is fine to run on demand.
+returns**. That browser-sync script is where the shim's `guard` goes, as the
+first step of whatever binds the fixed port (`"dev": "./scripts/agent-env-wp.sh
+guard && bin/dev"`), so inside an env it refuses instead of colliding. If you're
+actively editing CSS/JS in an env, run the compiler's own watch in the worktree
+(`cd <install>/wp-content/themes/<theme>` and the `sass --watch` line from
+`bin/dev`, say), not the guarded script. A plain compile step (`npm run
+compile:css`, `npm run bundle`, etc.) is fine to run on demand.
 
 ## Database and the site URL
 
@@ -240,14 +259,14 @@ Teardown runs from the main checkout that created the env: `ExitWorktree`
 (action `keep`) first, then `scripts/agent-env-wp.sh destroy <name>` from
 there, in the same turn. Both the script and the guard refuse a destroy from
 inside the env (the `rm -rf` would take the shell's working directory with
-it). An env's own `scripts/` copy is whatever its branch last committed, so
-commit the script after changing it, or an env created afterwards still
-carries the old copy.
+it). The env's worktree carries the repo's shim, which never changes; env
+behavior comes from the config outside the repo, so a config change applies to
+the next command in every env, old or new.
 
 ## Sibling repos: theme + plugin in one env
 
-A feature that spans both custom repos uses one env. Each repo's copy of the
-script lists the other in `SIBLING_REPOS` (install-relative, e.g.
+A feature that spans both custom repos uses one env. Each repo's config lists
+the other in `SIBLING_REPOS` (install-relative, e.g.
 `wp-content/plugins/tab-handbook-plugin`), and `create` then swaps that repo's
 CoW snapshot for a worktree of its main checkout on the same `worktree-<name>`
 branch, from whatever that checkout has checked out (announced, with a warning
@@ -256,6 +275,11 @@ if it is dirty), installs its deps the same way and runs
 every sibling before touching anything, removes every worktree, and deletes each
 branch only when it carries no unique commits. Work done in a sibling worktree
 lands on that repo's `worktree-<name>` branch: push it and open its PR from there.
+`list` shows only the envs created FROM the repo whose shim runs it (an env is
+recorded under the creating repo's `.agent-env/wp/`), so a theme-created env is
+absent from the plugin's `list`, from its main checkout and from its worktree in
+that env alike, even though the plugin has a worktree there. That is not a lost env;
+run `list` through the repo that created it.
 
 The list is explicit on purpose: vendored plugins carry `.git` directories too,
 so detection would branch third-party code. Everything not listed stays a CoW
@@ -321,12 +345,12 @@ the ports in a `WP-ENV` column, `create` prints them, and the SessionStart hook
 restates them inside the env.
 
 **Why a slot per worktree rather than a wider `PORTS_PER_ENV`.** The pool's slot
-math is `(port - PORT_BASE) / PORT_STRIDE`, so it only holds while every fork
-sharing `ENV_PARENT` uses one stride; widening it in one fork while another
+math is `(port - PORT_BASE) / PORT_STRIDE`, so it only holds while every config
+sharing `ENV_PARENT` uses one stride; widening it in one config while another
 still runs the old value hands out overlapping ports. An env with a sibling
-needs a second pair anyway. A registry file, by contrast, is respected by every
-fork, propagated or not, because each reads all of them. The env's own slot
-(`wp server`) is untouched.
+needs a second pair anyway. One more registry file, by contrast, costs nothing:
+allocation reads every file in the pool. The env's own slot (`wp server`) is
+untouched.
 
 **Tests must read the port.** This is the project's half of the contract, and
 the reason the theme and plugin needed a patch: a suite that hardcodes
@@ -457,7 +481,7 @@ serves all of them.
 - **Ports come from one pool per `ENV_PARENT`** (`<ENV_PARENT>/.wp-slots/`): a slot
   is taken when the registry says so, or an existing env's `wp-config.php` declares
   its port, or a worktree's `.wp-env.override.json` does (a wp-env slot), so repos
-  that share an `ENV_PARENT` need no `PORT_BASE` coordination. Every fork sharing
+  that share an `ENV_PARENT` need no `PORT_BASE` coordination. Every config sharing
   the pool must keep the same `PORT_STRIDE`; the slot math depends on it.
 - **Env clones live outside Herd-parked paths** (CONFIG `ENV_PARENT`) so Herd
   doesn't try to serve them; we serve via `wp server`.

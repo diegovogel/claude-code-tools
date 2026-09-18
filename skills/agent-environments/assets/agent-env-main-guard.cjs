@@ -134,9 +134,9 @@ try {
   if (!install) process.exit(0);
   const envName = install.slice(install.lastIndexOf("__") + 2);
   const mains = mainCheckouts(install);
-  // Destroying the env the shell stands in: the script refuses that itself, but
-  // an env's in-tree copy of the script is whatever its branch last committed,
-  // and a session bound by EnterWorktree cannot run the main checkout's copy.
+  // Destroying the env the shell stands in: the engine refuses that itself.
+  // This tripwire is the belt-and-braces layer: it fires before anything runs,
+  // costs nothing if the refusal ever regresses, and names the checkout to use.
   // Matched anywhere on the line on purpose (quoted paths, VAR= and nohup
   // prefixes, `bash -c`): a mention in an echo is a cheap false positive for a
   // tripwire, while a missed spelling is the exact hazard.

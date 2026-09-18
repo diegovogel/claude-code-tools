@@ -1,8 +1,9 @@
 # Agent environments for Laravel (worked example)
 
-A filled-in **per-project section** for a Laravel app, plus the decisions behind
-it. The engine in `assets/agent-env.sh` is unchanged and stack-agnostic; this is
-just what goes between its `PER-PROJECT SECTION` markers. Read
+A filled-in **project config** (`~/.claude/agent-environments/<project>/project.sh`)
+for a Laravel app, plus the decisions behind it. The engine in
+`assets/agent-env.sh` is unchanged and stack-agnostic; this is just what it
+sources for the project. Read
 [`stacks.md`](stacks.md) first for the generic framework; this file is the
 Laravel-specific fill-in. The same shape applies to any PHP/Composer app.
 
@@ -40,10 +41,11 @@ not the server. Postgres mirrors the MySQL branch below — add a `pgsql` arm to
 create/drop hooks (`psql`, or `createdb`/`dropdb`); reach for `CREATE DATABASE …
 TEMPLATE` when an env needs the populated dev data instead of fresh seeds.
 
-## The per-project section
+## The project config
 
-Paste this between the engine's `PER-PROJECT SECTION` markers and adjust the
-CONFIG. It covers SQLite and MySQL via one `DB_STRATEGY` switch.
+This is the content of `~/.claude/agent-environments/<project>/project.sh`
+(start from `assets/project.example.sh`, replace its body with this, adjust the
+CONFIG). It covers SQLite and MySQL via one `DB_STRATEGY` switch.
 
 ```bash
 # --- CONFIG -----------------------------------------------------------------
@@ -134,7 +136,10 @@ project_start_servers() {
   php artisan serve --host=127.0.0.1 --port="$web_port" >>logs/web.log 2>&1 &
   echo $! >.agent-env/web.pid
   if [[ -f package.json && -n "$vite_port" ]]; then
-    npm run dev -- --port="$vite_port" --host 127.0.0.1 >>logs/vite.log 2>&1 &
+    # Call vite directly, not `npm run dev`: that script carries the in-env
+    # guard (setup step 4) and exits 1 here, which would leave the env without
+    # Vite while serve still reports "up" (only the web URL is health-checked).
+    npx vite --port="$vite_port" --host 127.0.0.1 >>logs/vite.log 2>&1 &
     echo $! >.agent-env/vite.pid
   fi
   if grep -qE '^QUEUE_CONNECTION=(database|redis|beanstalkd|sqs)' .env 2>/dev/null; then
@@ -205,6 +210,14 @@ project_pre_destroy() {
 
 ## Gotchas (Laravel-specific)
 
+- **Start Vite directly in `project_start_servers`, never via `npm run dev`.**
+  Setup step 4 puts `./scripts/agent-env.sh guard` in front of `npm run dev`, so
+  a config that launches Vite with `npm run dev -- --port=...` gets the guard's
+  refusal in `logs/vite.log` and no Vite at all, while `serve` still reports the
+  env up because only the web URL is health-checked. Use
+  `npx vite --port="$vite_port" --host 127.0.0.1` (as above). Hit converting
+  resume-creator on 2026-09-18: the fork's section used `npm run dev` and the
+  guard was added to `package.json` in the same conversion.
 - **Cached config shadows `.env`.** If `bootstrap/cache/config.php` exists (from
   `config:cache`), it overrides the env's `.env` ports/DB. `project_after_provision`
   runs `config:clear`. (A fresh worktree usually has no cached config, since
@@ -224,6 +237,12 @@ project_pre_destroy() {
   resume-creator on 2026-09-14.
 - **`migrate --seed` is for a *fresh* per-env DB.** That's the case here (new
   schema / new sqlite file). Don't point an env at a shared/populated DB.
+- **A green in-env test run does not prove the per-env DB.** `phpunit.xml` usually
+  pins tests to `DB_CONNECTION=sqlite` / `DB_DATABASE=:memory:`, so `run <name> -- php
+  artisan test` never touches the MySQL schema the env was given. Prove the DB with a
+  non-test command instead:
+  `run <name> -- php artisan tinker --execute='echo DB::connection()->getDatabaseName();'`
+  must print `<base>_<env token>`. Seen while converting bluehorseentries on 2026-09-18.
 - **SQLite path is pinned per env** (`DB_DATABASE=database/database.sqlite` in
   `project_env_port_lines`). Without it, the env's DB file follows the app's
   config: most apps use `database_path('database.sqlite')` (env-local, fine), but

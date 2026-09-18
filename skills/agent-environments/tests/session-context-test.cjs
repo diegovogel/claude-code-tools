@@ -20,7 +20,8 @@ const registry = path.join(mainTheme, ".agent-env/wp/envx/meta.env");
 const log = path.join(root, ".claude/cache/agent-env-hooks.log");
 
 function git(cwd, ...args) {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  // GIT_CONFIG_GLOBAL/NOSYSTEM keep the global git config (commit signing via 1Password) out of the test repos.
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
   if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
   return r.stdout.trim();
 }

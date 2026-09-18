@@ -1,11 +1,13 @@
 # Adapting agent-env.sh to a project
 
-The engine in `assets/agent-env.sh` (everything below the `END PER-PROJECT
-SECTION` line) is stack-agnostic. Adapting to a project means filling in the
-**per-project section**: a CONFIG block and eight `project_*` hooks. This file
-is the detail behind each; read the section you need. For a complete filled-in
-example beyond the Node one shipped in the script, see [`laravel.md`](laravel.md)
-(Laravel/PHP, but the same shape fits any stack).
+The engine in `assets/agent-env.sh` is stack-agnostic and never edited per
+project. Adapting to a project means writing its **config**,
+`~/.claude/agent-environments/<project>/project.sh`: a CONFIG block and eight
+`project_*` hooks, which the engine sources at startup (start from
+`assets/project.example.sh`). This file is the detail behind each; read the
+section you need. For a complete filled-in example beyond the Node one in the
+example config, see [`laravel.md`](laravel.md) (Laravel/PHP, but the same shape
+fits any stack).
 
 ## Contents
 - [The adaptation surface (where the line is)](#the-adaptation-surface)
@@ -14,7 +16,7 @@ example beyond the Node one shipped in the script, see [`laravel.md`](laravel.md
 - [The dev/serve command](#the-devserve-command)
 - [Stateful services (DB, cache, queue, search)](#stateful-services)
 - [Fixed-address takeover QA](#fixed-address-takeover-qa)
-- [The in-env guard for non-Node stacks](#the-in-env-guard)
+- [The in-env guard](#the-in-env-guard)
 - [OS / copy-on-write notes](#os--copy-on-write-notes)
 - [Gotchas that bite](#gotchas-that-bite)
 
@@ -23,7 +25,7 @@ example beyond the Node one shipped in the script, see [`laravel.md`](laravel.md
 Everything that varies per project lives in exactly these nine places. This is
 the line: the skill provides the machinery; you supply these.
 
-| Knob | Where in the script | How to figure it out |
+| Knob | Where in `project.sh` | How to figure it out |
 |---|---|---|
 | Dependency dirs to clone | `project_seed_env_files` | What does a fresh checkout install that's slow/large? (`node_modules`, `vendor`, `.venv`, `target`) |
 | Lockfile reconcile | `project_seed_env_files` | The "install from lockfile" command (`npm ci`, `composer install`, `uv sync`) |
@@ -35,8 +37,13 @@ the line: the skill provides the machinery; you supply these.
 | Stateful teardown | `project_pre_destroy` | What per-env state outlives the worktree and must be removed (a MySQL schema, a cache namespace)? |
 | Fixed-address QA | `project_main_ports` | Is there an external integration pinned to specific ports/URLs? |
 
-Plus the CONFIG scalars (`PORT_BASE`, `PORT_STRIDE`, `MAIN_DEV_CMD`,
-`CANONICAL_BRANCH_PREFIX`, `WORKTREES_SUBDIR`).
+Plus the CONFIG scalars: `PORT_BASE` and `PORTS_PER_ENV` are required (no
+default, a deliberate per-project decision); `PORT_STRIDE`, `MAIN_DEV_CMD`,
+`LOCKFILES`, `CANONICAL_BRANCH_PREFIX` and `WORKTREES_SUBDIR` have engine
+defaults. Of the hooks, `project_seed_env_files`, `project_env_port_lines` and
+`project_start_servers` are required; the other five default to no-ops, so a
+config states only what it needs, and the engine lists whatever required piece
+is missing before it runs anything.
 
 `project_env_port_lines`, `project_after_provision`, and `project_pre_destroy`
 each receive the env **name** and **slot** as leading args, use them for anything
@@ -47,7 +54,7 @@ that must be unique per env (a `<base>_<name>` database, a per-env key prefix).
 The whole speed win is CoW-cloning the dependency tree instead of reinstalling.
 `clone_dir` (in the engine) already handles the OS split; you just name the dirs.
 
-- **Node**: `node_modules`. Reconcile with `npm ci` (fresh) / `npm install` (branch changed deps). Worked example ships in the script. **Monorepos** (pnpm/yarn/npm workspaces) keep a `node_modules` at the root **and** one per workspace package — clone them all (a real pnpm-workspace setup needed all 7). The internal links pnpm/yarn create are relative, so they resolve inside the env once every `node_modules` is cloned; clone only the root and the per-package symlinks dangle.
+- **Node**: `node_modules`. Reconcile with `npm ci` (fresh) / `npm install` (branch changed deps). Worked example: `assets/project.example.sh`. **Monorepos** (pnpm/yarn/npm workspaces) keep a `node_modules` at the root **and** one per workspace package: clone them all (a real pnpm-workspace setup needed all 7). The internal links pnpm/yarn create are relative, so they resolve inside the env once every `node_modules` is cloned; clone only the root and the per-package symlinks dangle.
 - **PHP/Laravel**: `vendor` (Composer) **and** usually `node_modules` (Vite/Mix assets). Reconcile with `composer install` and `npm ci`.
 - **Python**: `.venv` (or wherever the venv lives). Reconcile with `uv sync` / `pip install -r requirements.txt`. A CoW-cloned venv keeps the *source* checkout's absolute paths, which bites in two non-obvious ways beyond activation scripts / `pyvenv.cfg`:
   - **Editable installs (`pip install -e`) keep pointing at the source tree.** The `.pth`/finder the editable install wrote holds an absolute path to the *main* checkout's package dir, so `import yourpkg` in the env silently resolves to main's code — no error, just broken isolation (the env's tests pass against code you never changed). Re-run `pip install -e .` in `project_after_provision` to repoint it at the env (also picks up deps the branch added). Confirmed live: after the repoint, the package imported from the worktree, not the main checkout.
@@ -112,7 +119,7 @@ env later, or for round, readable port numbers. The engine refuses to run if
 
 **`PORT_BASE` is machine-global; pick a distinct one per repo.** The slot registry
 keeps ports unique *within* a repo, but localhost ports are a host-wide resource:
-if two repos on the same machine both keep the shipped default (`13000`), their
+if two repos on the same machine both keep the example config's `13000`, their
 first envs land on the same port and collide the instant both serve (seen in the
 wild: one repo's env wanted a port another repo's env had held for hours). So the
 first adaptation step for a new repo is a `PORT_BASE` no other repo on the machine
@@ -147,8 +154,9 @@ The managed block is written into the config file (`.env` by default) between
 markers, preserving everything else. **The config file must be gitignored**, or
 provision's edit registers as a dirty worktree and the destroy guard refuses to
 clean up. If the project's port config lives in a *tracked* file, write a
-gitignored overlay instead (e.g. `.env.local`) and change the `.env` region of
-`cmd_provision` plus `project_env_port_lines`.
+gitignored overlay instead (e.g. `.env.local`); the file name is fixed to `.env`
+in the engine's `cmd_provision`, so a project that needs another name needs an
+engine knob (flag it), not a per-project edit.
 
 ## The dev/serve command
 
@@ -158,12 +166,17 @@ writing one PID file per process into `.agent-env/` (the engine kills every
 subshell so each `&` job gets its own process group and stop kills whole trees.
 
 `project_health_urls` lists `label|url|timeout_seconds` lines the engine polls
-before declaring the env up. On any failure it tears the half-started stack back
-down so the next `serve` doesn't see stale PID files.
+before declaring the env up. The poll is a bare `curl -k -s` (no `-f`): any
+HTTP answer counts as up, a 401 from an auth-gated route or a 404 included, and
+only a refused connection, a TLS failure or a 2-second timeout keeps polling.
+So a protected endpoint is a fine health URL (email-archiver polls
+`/api/auth/validate`, which answers 401 without a token), and a self-signed
+dev cert needs nothing extra. On any failure it tears the half-started stack
+back down so the next `serve` doesn't see stale PID files.
 
 This is the least portable function, local dev launch differs wildly:
-- **Laravel**: `php artisan serve --port=<web>` + `npm run dev` (Vite) + maybe
-  `php artisan queue:work`. Serve via `artisan serve`, NOT Herd/Valet (they are
+- **Laravel**: `php artisan serve --port=<web>` + `npx vite --port=<vite>` (not
+  `npm run dev`, which carries the guard) + maybe `php artisan queue:work`. Serve via `artisan serve`, NOT Herd/Valet (they are
   domain-based on :80, not per-port). Full worked example in [`laravel.md`](laravel.md).
 - **Single-server apps**: one process, one PID file, one health URL.
 - **Compiled/long-build apps**: you may want a build step before launch.
@@ -322,17 +335,23 @@ wrong thing, and you drop the takeover bullets from the CLAUDE.md section.
 
 ## The in-env guard
 
-`assets/guard-not-in-env.cjs` is a Node script wired as the first step of the dev
-command (`node scripts/guard-not-in-env.cjs && <dev>`). It aborts when
-`.agent-env.json` is present in cwd (the signal that you're inside an env). Node
-keeps it cross-platform for projects that dev on Windows too.
+The shim answers `guard` itself, without the engine, so it is wired as the first
+step of the dev command in every stack: `"dev": "./scripts/agent-env.sh guard &&
+<dev>"` in package.json, and the same in a composer script or a Makefile recipe.
+It exits 1 when the cwd is an agent environment, detected with no config at all:
+an `.agent-env.json` marker (what `provision` writes) or a `.git` that is a FILE
+(a linked git worktree, which every env of either flow is, including a WordPress
+env's theme/plugin worktree, which carries no marker). npm and composer run
+scripts with cwd = the package root, which is what makes the `.git` check valid.
+It exits 0 everywhere else, including on a machine without the skill, so the dev
+command never depends on the engine. The message names `serve <name>` and says
+most tasks need only the test and build commands.
 
-For a non-Node stack, a shell guard in the dev script works the same way:
-
-```bash
-# at the top of your dev target / Makefile recipe
-[ -f .agent-env.json ] && { echo "✖ dev is disabled inside an agent env; use agent-env.sh serve <name>"; exit 1; }
-```
+A Composer script array (`composer dev`) wires it as its own element ahead of
+the real command, `"./scripts/agent-env.sh guard"`; Composer stops the array
+when that element exits 1 and reports "Script ./scripts/agent-env.sh guard
+handling the dev event returned with error code 1", which is the tell-tale that
+the shim, not an old Node guard, refused. Confirmed live in walkingman.
 
 ## OS / copy-on-write notes
 
@@ -384,5 +403,17 @@ For a non-Node stack, a shell guard in the dev script works the same way:
   only the homebrew dirs the engine prepends are present. If the build tool or
   language runtime lives elsewhere (moon at `~/.moon/bin`; asdf/proto/mise shims
   in their own dirs), `project_after_provision`'s codegen/build and
-  `run <name> -- <tool>` fail with "not found." Add the needed bin dirs to PATH in
-  the per-project section (one real setup adds `~/.moon/bin` and `~/.proto/bin`).
+  `run <name> -- <tool>` fail with "not found." Add the needed bin dirs to PATH at
+  the top level of the project config (one real setup adds `~/.moon/bin` and
+  `~/.proto/bin`).
+- **ESLint's legacy config cascade reaches the main checkout from a nested env.**
+  An env at `.claude/worktrees/<name>` sits three directories under the main
+  checkout, and ESLint 8 and older (`.eslintrc*`) merge every `.eslintrc` up the
+  directory tree until one says `"root": true`, so the main checkout's own
+  `.eslintrc` becomes a parent config of the env's. Any plugin both name then
+  resolves to two different files (main's `node_modules` and the env's CoW clone)
+  and lint aborts with `Plugin "<x>" was conflicted between ".eslintrc" and
+  "../../../.eslintrc"` while the same command passes at main. Fix once, in the
+  project: add `"root": true` to the repo's `.eslintrc` (backward compatible when
+  no config lives above the repo, the normal case). ESLint 9's flat config has no
+  cascade, so it is unaffected. Seen live: ttp-website (`next lint`, ESLint 7).

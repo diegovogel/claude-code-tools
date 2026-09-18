@@ -34,6 +34,16 @@
 #
 # Reuses the generic engine's primitives (slots, unique_commits guard, pid/health
 # machinery, CoW clone). See references/wordpress.md for the model and rationale.
+#
+# ONE ENGINE, MANY REPOS. This file is the only copy of the WordPress engine and
+# is never copied into a repo. A theme/plugin repo carries a ~30-line shim at
+# scripts/agent-env-wp.sh (rendered from the skill's assets/shim.sh) that sets
+# AGENT_ENV_PROJECT and execs this file; the repo's own knobs (the CONFIG
+# scalars, project_after_worktree, project_sync_deps) live OUTSIDE the repo in
+# ~/.claude/agent-environments/<project>/project.sh, sourced below. An engine fix
+# lands in every repo at once instead of being propagated by hand into each
+# repo's copy; a repo is deliberately not self-contained, and the shim's error
+# message tells a machine without the skill exactly what is missing.
 
 set -euo pipefail
 
@@ -44,87 +54,8 @@ done
 say()  { echo "agent-env-wp: $*"; }
 die()  { echo "agent-env-wp: ERROR: $*" >&2; exit 1; }
 warn() { echo "agent-env-wp: WARNING: $*" >&2; }
-
-# ===========================================================================
-# >>> PER-PROJECT CONFIG: edit these for your setup.
-# ===========================================================================
-# Where full-install clones live. Keep it OUT of any Herd/Valet parked path so
-# the clones don't get auto-served as <name>.test; we serve them via wp server.
-ENV_PARENT="$HOME/WebDev/Sites/.wp-agent-envs"
-PORT_BASE=18300                 # slot N -> PORT_BASE + PORT_STRIDE*N
-PORT_STRIDE=2                   # >= PORTS_PER_ENV (the floor); densest packing.
-                                # Every fork sharing ENV_PARENT must use the SAME
-                                # stride: the pool's slot math is (port-base)/stride.
-PORTS_PER_ENV=2                 # wp server + (optional) asset dev/watch server. A
-                                # worktree's wp-env takes a slot of its own (see
-                                # setup_wp_env), so this also has to cover wp-env's
-                                # two ports (development + tests); keep it >= 2.
-CANONICAL_BRANCH_PREFIX="worktree-"
-WP="wp"                         # WP-CLI binary
-WP_SERVER_WORKERS=4             # php -S worker count; MUST be >1 or WordPress
-                                # deadlocks (its loopback requests for wp-cron /
-                                # Site Health can't be served by a single worker)
-WEB_HOST="localhost"            # host the env is served and addressed on. Prefer a
-                                # NAME over a bare IP: third-party services that
-                                # restrict by origin/referrer (Font Awesome kits,
-                                # Google Maps / reCAPTCHA keys, Mapbox) allowlist
-                                # DOMAINS, usually permit localhost by default, and
-                                # cannot allowlist an IP at all. On 127.0.0.1 those
-                                # 403 and their widgets silently vanish, so visual
-                                # QA in an env looks like the branch broke the site.
-                                # WEB address only: the mysql -h below stays
-                                # 127.0.0.1 (that is the DB connection, where a
-                                # name would switch TCP for a unix socket).
-# URL handling: "search-replace" = rewrite <host> -> $WEB_HOST:<port> in the env
-# DB so the env is fully self-contained (media/content resolve from the env).
-# "override" = only set WP_HOME/WP_SITEURL (faster; literal .test URLs in stored
-# content still load from the source site via Herd). Override is ALWAYS applied;
-# this only toggles the additional search-replace.
-URL_MODE="search-replace"
-# Lockfiles whose change in a pull triggers project_sync_deps (space-separated,
-# repo-root-relative). WP theme/plugin repos commonly carry both.
-LOCKFILES="composer.lock package-lock.json"
-# Additional paths whose change in a pull ALSO triggers project_sync_deps. An
-# entry ending in "/" matches anything beneath it; anything else is an exact
-# path, like LOCKFILES. Space-separated, repo-root-relative.
-#
-# For sources whose BUILD OUTPUT is gitignored -- compiled CSS is the usual case.
-# A lockfile is not the only thing a merge can invalidate: pull in an scss change
-# and the checkout serves CSS built from sources it no longer has, with nothing to
-# notice. e.g. SYNC_PATHS="scss/"
-SYNC_PATHS=""
-# Other custom repos in this install that every env should branch alongside this
-# one (space-separated, install-relative, e.g. "wp-content/plugins/my-plugin").
-# The canonical case is a custom theme plus a custom plugin: each repo's copy of
-# this script lists the OTHER. create gives each sibling a worktree on the same
-# `worktree-<name>` branch, from that checkout's current branch; destroy reclaims
-# it under the same dirty/unpushed guard. Everything not listed stays a CoW
-# snapshot, which is right for third-party code. The list is explicit on purpose:
-# vendored plugins carry .git directories too, so detection would branch those.
-SIBLING_REPOS=""
-
-# Build step for a fresh worktree, run with cwd = that worktree once its
-# dependencies are in place: once for this repo, once per sibling. Compiled
-# assets are usually gitignored, so a fresh worktree has none and the site
-# renders unstyled. Dispatch on the install-relative path when siblings differ.
-project_after_worktree() { # <install-relative path>
-  return 0
-}
-
-# Reconcile the theme/plugin repo's dependencies after a pull changed a lockfile.
-# Run by the post-merge/post-rewrite git hooks (installed by `install-hooks`) so
-# the repo's main checkout can't end up with a composer.json/package.json that
-# lists a dependency nobody installed (the trap when an env's PR that added a
-# package merges into the repo's main). Runs with cwd = repo root; keep it
-# idempotent. Adjust to your repo's actual managers (drop one line if unused).
-project_sync_deps() {
-  if [[ -f composer.json ]]; then composer install --no-interaction --no-progress; fi
-  if [[ -f package.json ]]; then npm install --no-audit --no-fund; fi
-  return 0
-}
-# ===========================================================================
-
-# ---- primitives borrowed from the generic engine --------------------------
+# Defined ahead of the config, like the generic engine does, so a config may
+# call it at top level too (assets/project-wp.example.sh says it can).
 clone_dir() {
   local src="$1" dst="$2"
   case "$(uname -s)" in
@@ -132,6 +63,71 @@ clone_dir() {
     *)      cp -R --reflink=auto "$src" "$dst" 2>/dev/null ;;
   esac
 }
+
+# ===========================================================================
+# PROJECT CONFIG. Everything per repo (the CONFIG scalars, project_after_worktree
+# and project_sync_deps) is sourced from
+#   ${AGENT_ENV_CONFIG_DIR:-$HOME/.claude/agent-environments}/$AGENT_ENV_PROJECT/project.sh
+# The shim sets AGENT_ENV_PROJECT; AGENT_ENV_CONFIG_DIR exists so tests can point
+# at a synthetic directory. Defaults are set BEFORE sourcing, so a config only
+# has to state what differs, and a config that restates everything (a config
+# block moved out of an older in-repo fork) works unchanged. Sourcing runs under
+# set -euo pipefail, and the config may run top-level statements (extend PATH,
+# define a helper); that is intended. Worked example, with the rationale behind
+# every value: assets/project-wp.example.sh.
+# ===========================================================================
+
+# --- defaults; a config may override any of them ------------------------------
+ENV_PARENT="$HOME/WebDev/Sites/.wp-agent-envs"  # full-install clones; keep OUT of Herd-parked paths
+PORT_STRIDE=""                  # empty = PORTS_PER_ENV; every config sharing
+                                # ENV_PARENT must use the SAME stride (pool math)
+PORTS_PER_ENV=2                 # wp server + asset server; wp-env needs >= 2 too
+CANONICAL_BRANCH_PREFIX="worktree-"
+WP="wp"                         # WP-CLI binary
+WP_SERVER_WORKERS=4             # MUST be >1 or WordPress deadlocks on its loopback requests
+WEB_HOST="localhost"            # a NAME, not an IP (origin-restricted third-party keys)
+URL_MODE="search-replace"       # "search-replace" (self-contained env) or "override" (faster)
+LOCKFILES="composer.lock package-lock.json"
+SYNC_PATHS=""                   # extra paths whose change in a pull triggers project_sync_deps
+SIBLING_REPOS=""                # other custom repos in the install, branched alongside this one
+# Required, deliberately without a default: PORT_BASE (slot N -> PORT_BASE + PORT_STRIDE*N).
+PORT_BASE=""
+
+# Build step for a fresh worktree (cwd = that worktree, once its dependencies
+# are in place; once for this repo, once per sibling). Builds nothing by default.
+project_after_worktree() { # <install-relative path>
+  return 0
+}
+# Reconcile the repo's dependencies after a pull changed a watched path (cwd =
+# repo root; the git hooks call it via sync-deps). Override for other managers.
+project_sync_deps() {
+  if [[ -f composer.json ]]; then composer install --no-interaction --no-progress; fi
+  if [[ -f package.json ]]; then npm install --no-audit --no-fund; fi
+  return 0
+}
+
+# --- load and validate, before any subcommand runs ----------------------------
+[[ -n "${AGENT_ENV_PROJECT:-}" ]] \
+  || die "AGENT_ENV_PROJECT is not set. This engine is normally run through the repo's shim (scripts/agent-env-wp.sh), which sets it; see the agent-environments skill, SKILL.md \"Setting up\""
+# Interpolated into a path that is then sourced as shell: the same character
+# class env_dir applies to env names, so the name cannot traverse.
+[[ "$AGENT_ENV_PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  || die "invalid AGENT_ENV_PROJECT '$AGENT_ENV_PROJECT' (allowed: [A-Za-z0-9._-], starting with a letter or digit)"
+AGENT_ENV_CONFIG="${AGENT_ENV_CONFIG_DIR:-$HOME/.claude/agent-environments}/$AGENT_ENV_PROJECT/project.sh"
+[[ -f "$AGENT_ENV_CONFIG" ]] \
+  || die "no project config for '$AGENT_ENV_PROJECT' at $AGENT_ENV_CONFIG. Create it from assets/project-wp.example.sh in the agent-environments skill (SKILL.md, \"Setting up\", step 3)"
+# shellcheck disable=SC1090
+source "$AGENT_ENV_CONFIG"
+[[ -n "$PORT_STRIDE" || -z "$PORTS_PER_ENV" ]] || PORT_STRIDE="$PORTS_PER_ENV"
+missing=""
+for v in PORT_BASE PORTS_PER_ENV; do
+  [[ -n "${!v:-}" ]] || missing+=$'\n'"  $v (required scalar, unset or empty)"
+done
+[[ -z "$missing" ]] \
+  || die "project config $AGENT_ENV_CONFIG is incomplete:$missing"$'\n'"  (assets/project-wp.example.sh in the agent-environments skill shows the full shape)"
+unset missing v
+
+# ---- primitives borrowed from the generic engine --------------------------
 # True only if the pidfile names a LIVE process that is still this env's server.
 # A bare kill -0 is not enough: once the server exits, the OS can recycle its PID
 # onto an unrelated process, which would make `serve` report success without
@@ -279,9 +275,10 @@ exclude_artifacts() { # repo
 # the ones that hardcode the default instead.
 #
 # A separate slot rather than a wider PORTS_PER_ENV: the pool's slot math only
-# holds while every fork sharing ENV_PARENT uses one stride, an env with a
-# sibling needs a second pair anyway, and a registry file is respected by every
-# fork, propagated or not. The env's own slot (wp server) is untouched.
+# holds while every config sharing ENV_PARENT uses one stride, an env with a
+# sibling needs a second pair anyway, and one more registry file costs nothing,
+# since allocation reads every file in the pool. The env's own slot (wp server)
+# is untouched.
 
 # wp-env's per-checkout work directory (~/.wp-env/<name>): the compose file, the
 # WordPress download, and the name Docker derives the project from. Mirrors
@@ -464,9 +461,9 @@ cmd_prune_wp_envs() {
 # repo's installed dependencies so a branch that added a package (merged from an
 # env's PR) can't leave the repo's main checkout with a manifest listing a
 # dependency nobody installed. The hooks just call back into `sync-deps`, which
-# runs the per-project project_sync_deps — so a new setup only fills
+# runs the per-project project_sync_deps, so a new setup only fills
 # project_sync_deps + LOCKFILES (and SYNC_PATHS, for sources whose build output
-# is gitignored) in the per-project config above.
+# is gitignored) in the project config.
 
 write_git_hook() {  # dest-path
   cat >"$1" <<'HOOK'
@@ -517,7 +514,7 @@ cmd_install_hooks() {
         [[ -n "$quiet" ]] || say "git hooks installed (.githooks); core.hooksPath set"
       fi
       ;;
-    ".githooks") : ;;  # already active
+    ".githooks"|"$main/.githooks") : ;;  # already active
     *)
       warn "core.hooksPath is '$cur'; wrote .githooks/{post-merge,post-rewrite} but left it unchanged — set core.hooksPath=.githooks or chain the hooks from your existing hooks dir" ;;
   esac
@@ -963,7 +960,7 @@ cmd_destroy() {
   local here inst; here=$(pwd -P)
   inst=$(cd "$AGENT_ENV_INSTALL" 2>/dev/null && pwd -P || printf '%s' "$AGENT_ENV_INSTALL")
   [[ "$here" != "$inst" && "$here" != "$inst"/* ]] \
-    || die "destroy must run from outside the env. Move the session's working directory to $repo first (desktop app: change_directory; after EnterWorktree: ExitWorktree with action keep), then rerun: $repo/scripts/$(basename "$0") destroy $name"
+    || die "destroy must run from outside the env. Move the session's working directory to $repo first (desktop app: change_directory; after EnterWorktree: ExitWorktree with action keep), then rerun: $repo/scripts/$(basename "${AGENT_ENV_SHIM:-$0}") destroy $name"
   # meta.env exists from the start of create, so destroy can reach a live
   # creation. Take the lifecycle mutex for the whole teardown.
   take_env_lock "$AGENT_ENV_SITE" "$name" "destroying it"

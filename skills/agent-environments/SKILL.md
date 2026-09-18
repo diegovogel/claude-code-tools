@@ -33,12 +33,16 @@ across multiple tasks) can work truly in parallel. A person working directly in
 the main checkout is just one more of those workspaces: see
 [Working alongside a person](#working-alongside-a-person).
 
-The system is a single project-local script, `scripts/agent-env.sh`, plus a
-small in-dev guard and a short CLAUDE.md section. This skill ships a clean,
-validated **reference** of all three (in `assets/`) and the guidance to adapt
-them. Each project keeps its **own** copy of the script (self-contained, so it
-works on CI and for collaborators who don't have this skill); the skill is the
-durable home for the engine and the operating rules.
+The system is one **engine** (`assets/agent-env.sh`, or `assets/agent-env-wp.sh`
+for the WordPress flow) that lives only in this skill, a **per-project config**
+outside the repo (`~/.claude/agent-environments/<project>/project.sh`: the
+ports, the dependency dirs, the `project_*` hooks), and a ~30-line tracked
+**shim** inside the repo (`scripts/agent-env.sh`) that sets the project name and
+execs the engine. The shim also answers `guard`, the in-dev guard, on its own.
+A repo is deliberately not self-contained: an engine fix lands in every project
+at once instead of being propagated by hand into a copy per repo, and on a
+machine without the skill the shim's error says exactly what is missing. The
+short CLAUDE.md section completes the set, the always-loaded layer.
 
 ## First: are you operating, or setting up?
 
@@ -74,6 +78,7 @@ package scripts for the exact wrappers):
 | `scripts/agent-env.sh provision [path]` | Provision an existing worktree (idempotent) |
 | `scripts/agent-env.sh run <name> -- <cmd>` | Run a command **in** the env regardless of the shell's cwd (the re-anchor fix) |
 | `scripts/agent-env.sh serve <name>` | Start the env's dev stack on its own ports (background, health-checked) |
+| `scripts/agent-env.sh view <name>` | Serve if needed, print the env's URL, open it in the browser (`AGENT_ENV_NO_OPEN=1` prints only) |
 | `scripts/agent-env.sh stop <name>` | Stop that env's dev stack |
 | `scripts/agent-env.sh list` | All envs: branch / dirty / unpushed / ports / serving |
 | `scripts/agent-env.sh destroy <name>` | Guarded teardown (refuses dirty/unpushed work) |
@@ -360,18 +365,20 @@ named as the reason.
 
 ## Setting up in a new project
 
-The goal: drop a self-contained, adapted `scripts/agent-env.sh` into the repo,
-wire the guard and wrappers, and add the CLAUDE.md section. The engine is
-copied verbatim; you fill in a fenced per-project section.
+The goal: install the shim in the repo, write the project's config outside it,
+wire the guard and wrappers, and add the CLAUDE.md section. The engine is never
+copied; you fill in a config file.
 
 > **Exception: the repo is a sub-component of a larger runnable app.** If the
 > thing you run isn't the git repo itself but an app the repo lives *inside* (the
 > canonical case: a WordPress theme/plugin nested in a full WP install), the
 > engine's "worktree = project" model doesn't fit, the env has to be the whole app
 > with the repo swapped in. That needs a different flow; see
-> [`references/wordpress.md`](references/wordpress.md), which ships its own script
-> [`assets/agent-env-wp.sh`](assets/agent-env-wp.sh) (reusing the engine's slot,
-> guard, and pid primitives). Use the steps below only when the repo is itself the
+> [`references/wordpress.md`](references/wordpress.md), which ships its own engine
+> [`assets/agent-env-wp.sh`](assets/agent-env-wp.sh) (reusing the generic engine's
+> slot, guard, and pid primitives, wired through the same shim + config model,
+> with [`assets/project-wp.example.sh`](assets/project-wp.example.sh) as the
+> config to start from). Use the steps below only when the repo is itself the
 > runnable project (Node, Laravel, Python, etc.).
 
 > **Exception: no local state to isolate (a Shopify theme).** If the repo has no
@@ -420,38 +427,61 @@ full non-Node fill-in see [`references/laravel.md`](references/laravel.md)):
    (SQLite) needs nothing, it goes away with the worktree.
 7. **Fixed-address integration**: is there one (manifest, redirect URI, webhook)?
    That decides whether takeover QA applies.
-8. **The main dev command name** (for the guard's message) and where to wire the
-   wrapper commands (package.json scripts / composer / Makefile).
+8. **The main dev command name** (`MAIN_DEV_CMD`, named in the engine's
+   messages) and where to wire the guard and the wrapper commands (package.json
+   scripts / composer / Makefile).
 
 Inspect the repo and ask the user where it's genuinely ambiguous (especially
 stateful services and fixed-address integrations, those aren't always visible
 in the code).
 
-### 2. Copy the assets
+### 2. Install the shim
 
-Copy [`assets/agent-env.sh`](assets/agent-env.sh) and
-[`assets/guard-not-in-env.cjs`](assets/guard-not-in-env.cjs) into the project's
-`scripts/`. `chmod +x scripts/agent-env.sh`.
+Render [`assets/shim.sh`](assets/shim.sh) into the project's
+`scripts/agent-env.sh` with both placeholders filled: `__PROJECT__` is the
+project name (the repo directory's basename) and `__ENGINE__` is
+`agent-env.sh`. Then make it executable:
 
-### 3. Fill the per-project section
+```bash
+name=$(basename "$PWD")
+sed -e "s/__PROJECT__/$name/g" -e "s/__ENGINE__/agent-env.sh/g" \
+  ~/.claude/skills/agent-environments/assets/shim.sh > scripts/agent-env.sh
+chmod +x scripts/agent-env.sh
+```
 
-In `scripts/agent-env.sh`, edit **only** the fenced `PER-PROJECT SECTION` (the
-CONFIG block + the eight `project_*` hooks, including `project_sync_deps` +
-`LOCKFILES` for the post-pull dependency-sync hook). The shipped values are a worked
-example for a Vite+Express Node project; keep what fits, rewrite what doesn't,
-using [`references/stacks.md`](references/stacks.md) for each hook and
+The shim is the whole in-repo footprint and never changes after this; every
+knob lives in the config (step 3). `AGENT_ENV_ENGINE` points it at another
+engine path when you need to test one.
+
+### 3. Write the project config
+
+Create `~/.claude/agent-environments/<name>/project.sh` (the same `<name>` the
+shim carries) from [`assets/project.example.sh`](assets/project.example.sh): the
+CONFIG scalars + the eight `project_*` hooks, including `project_sync_deps` +
+`LOCKFILES` for the post-pull dependency-sync hook. The example's values are a
+worked Vite+Express Node project; keep what fits, rewrite what doesn't, using
+[`references/stacks.md`](references/stacks.md) for each hook and
 [`references/laravel.md`](references/laravel.md) for a full Laravel/PHP fill-in
-(SQLite + MySQL, queue worker, per-env DB). Leave the engine below the fence
-untouched. One CONFIG scalar needs cross-repo coordination: set **`PORT_BASE`** to
-a band no other repo on this machine uses, ports are machine-global and the shipped
-default `13000` collides if two repos keep it (probe + detail in
-[`references/stacks.md`](references/stacks.md)).
+(SQLite + MySQL, queue worker, per-env DB). The engine sets defaults before it
+sources the file, so a config only has to state what differs; `PORT_BASE`,
+`PORTS_PER_ENV`, `project_seed_env_files`, `project_env_port_lines` and
+`project_start_servers` are required, and the engine refuses to run until every
+one of them is there (it lists what is missing). One scalar needs cross-repo
+coordination: set **`PORT_BASE`** to a band no other repo on this machine uses,
+ports are machine-global and the example's `13000` collides if two repos keep
+it (probe + detail in [`references/stacks.md`](references/stacks.md)). The
+config dir sits outside the skill on purpose: the publish repo's sync mirrors
+the whole skill directory and must not sweep machine-specific configs into a
+public repo, and `~/.claude` is itself versioned, so the configs are too.
 
-### 4. Wire the guard and wrapper commands
+### 4. Wire the guard, the wrapper commands and the reanchor hook
 
 - Prepend the guard to the dev command, e.g. in package.json:
-  `"dev": "node scripts/guard-not-in-env.cjs && <real dev command>"`. For a
-  non-Node stack, use the shell one-liner in `references/stacks.md` instead.
+  `"dev": "./scripts/agent-env.sh guard && <real dev command>"` (a composer
+  script or a Makefile recipe likewise). The shim answers `guard` itself, so
+  the dev command keeps working on a machine without the skill; it refuses
+  inside any linked worktree or provisioned env (detail in
+  `references/stacks.md`).
 - Add convenience wrappers so the common operations are one word, e.g.:
   `"serve": "./scripts/agent-env.sh serve --main-ports"`,
   `"stop": "./scripts/agent-env.sh stop"`,
@@ -492,19 +522,21 @@ project's CLAUDE.md and replace every `<PLACEHOLDER>`. Keep it short: it's the
 always-loaded layer (project facts + the few safety rules that must hold even
 when this skill isn't loaded). The full mechanics stay in this skill.
 
-### 6. Gitignore the artifacts
+### 6. Gitignore the artifacts, commit the shim and the hooks
 
 Ensure these are gitignored: the config file the managed block writes to (e.g.
-`.env`), the dependency dirs, `logs/`, and `.claude/`. The script writes
+`.env`), the dependency dirs, `logs/`, and `.claude/`. The engine writes
 `.agent-env/` and `.agent-env.json` into `.git/info/exclude` itself. **The
 config file must be gitignored**. Otherwise provision's managed-block edit
 shows the worktree as dirty and the destroy guard blocks cleanup.
 
-**Commit `.githooks/` — do NOT gitignore it.** The first `provision` (or, for
-WordPress, `create`) auto-installs the dependency-sync git hooks there and points
-`core.hooksPath` at it (idempotent, quiet). Commit the dir so worktrees and
-collaborators inherit the hook; an untracked `.githooks/` works for your checkout
-but vanishes on `git clean -fdx` and isn't checked out into worktrees. (You can
+**Commit the shim (`scripts/agent-env.sh`) and `.githooks/`; do NOT gitignore
+either.** The first `provision` (or, for WordPress, `create`) auto-installs the
+dependency-sync git hooks there and points `core.hooksPath` at it (idempotent,
+quiet). Commit the dir so worktrees and collaborators inherit the hook; an
+untracked `.githooks/` works for your checkout but vanishes on `git clean -fdx`
+and isn't checked out into worktrees. The shim is committed for the same
+reason: a worktree runs `provision` through the copy it checks out. (You can
 also run `scripts/agent-env.sh install-hooks` explicitly.) See
 [`references/stacks.md`](references/stacks.md#keeping-the-main-checkout-in-sync-after-a-pull-project_sync_deps).
 
@@ -512,7 +544,7 @@ also run `scripts/agent-env.sh install-hooks` explicitly.) See
 
 From the main checkout: `create <name>` → `list` (confirm distinct ports, the
 env shows up) → `provision <name>` again (idempotent) → `serve <name>` then hit a
-health URL → `stop`. That validates your per-project functions are wired right.
+health URL → `stop`. That validates your config's hooks are wired right.
 
 Then prove the goal that matters most: **an env can run the project's _entire_
 test suite, including E2E if one exists.** Run each suite in the env —
@@ -561,8 +593,9 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
 - **Worktrees live in `.claude/worktrees/`** (the runtime's own location), so
   Claude can `EnterWorktree` into them. The runtime's auto-cleanup sweep can't
   touch them because it requires no untracked files and a provisioned env always
-  has some (config, deps, `.agent-env.json`). Relocating is a one-line CONFIG
-  change if non-Claude agents ever need them elsewhere.
+  has some (config, deps, `.agent-env.json`). Relocating is a one-line change
+  in the project config (`WORKTREES_SUBDIR`) if non-Claude agents ever need
+  them elsewhere.
 - **Per-env ports** come from a slot registry
   (`<main>/.agent-env/slots/<name>`): each env takes the lowest free slot, and
   slot N → ports `PORT_BASE + STRIDE*N …`, a unique non-overlapping set so
@@ -581,13 +614,40 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   the recurring trap where an env's PR adds a package, the lockfile merges into
   main, but nobody installs it there. Auto-installed by `provision`; the hooks
   just delegate to `agent-env.sh sync-deps` so the install logic lives only in the
-  per-project section.
+  project config.
+- **One engine, a config per project, a shim per repo.** The engine lives only
+  in this skill. Each repo tracks a ~30-line `scripts/agent-env.sh` that sets
+  `AGENT_ENV_PROJECT` and execs it, and the engine sources the project's knobs
+  from `~/.claude/agent-environments/<project>/project.sh` before any
+  subcommand runs. Before this, every repo carried a full copy of the engine
+  with a fenced per-project section, and every engine fix had to be propagated
+  by hand into each copy, which drifted by hundreds of lines. Nothing outside
+  this machine consumed those copies, so a repo is no longer self-contained by
+  design: the shim's error message tells a machine without the skill what is
+  missing, and `guard` is answered by the shim so the dev command needs no
+  engine at all.
 
 ## Files in this skill
 
-- [`assets/agent-env.sh`](assets/agent-env.sh): the reference script: fenced
-  per-project section (worked Node/Vite example) over a stack-agnostic engine.
-- [`assets/guard-not-in-env.cjs`](assets/guard-not-in-env.cjs): the in-dev guard.
+- [`assets/agent-env.sh`](assets/agent-env.sh): the generic engine, the only
+  copy, directly runnable: stack-agnostic, it sources the project's config at
+  startup (`AGENT_ENV_PROJECT` from the shim; `AGENT_ENV_CONFIG_DIR` overrides
+  the config root, which the tests use) and refuses to run until every required
+  value and hook is there.
+- [`assets/shim.sh`](assets/shim.sh): the template for the tracked in-repo
+  shim (`scripts/agent-env.sh`, or `scripts/agent-env-wp.sh` for WordPress),
+  rendered once with `__PROJECT__` and `__ENGINE__` filled. It answers `guard`
+  locally and execs the engine for everything else (`AGENT_ENV_ENGINE`
+  overrides the engine path), exporting `AGENT_ENV_SHIM` so engine messages
+  name it.
+- [`assets/project.example.sh`](assets/project.example.sh) and
+  [`assets/project-wp.example.sh`](assets/project-wp.example.sh): worked
+  configs (a Vite+Express Node project; a WordPress theme/plugin), the files a
+  project's config starts from.
+- `~/.claude/agent-environments/<project>/project.sh` (outside the skill, one
+  per repo): the configs the engines source. Kept out of the skill directory so
+  the publish repo's sync never sweeps machine-specific configs into a public
+  repo; versioned by `~/.claude`'s own git repo.
 - [`assets/worktree-edit-guard.cjs`](assets/worktree-edit-guard.cjs): a `PreToolUse`
   hook (wired in `~/.claude/settings.json`) that blocks Edit/Write/MultiEdit to
   the main checkout while the session is in an agent-env worktree — the backstop
@@ -622,8 +682,14 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
 - [`tests/`](tests/): one node script per hook (the Bash guard, the edit guard,
   the EnterWorktree gate, the SessionStart hook), each building its own
   synthetic install (real git repos for the SessionStart hook) and asserting
-  the fail-open contract. `node tests/<file>` exits non-zero on a failure.
-  Change a hook, run its test.
+  the fail-open contract; plus `engine-config-test.sh` (bash), which renders
+  the shim into a temp git repo, points `AGENT_ENV_CONFIG_DIR` at a temp dir
+  and checks the config contract (a missing or incomplete config dies naming
+  the path and what is missing), the shim's `guard` in both flows, and a
+  create / list / provision-from-inside / run / serve / view / destroy round-trip
+  that leaves the main checkout clean. `node tests/<file>` and
+  `bash tests/engine-config-test.sh` exit non-zero on a failure. Change a hook
+  or an engine, run its test.
 - [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh): a
   `SessionStart` hook that fires when provisioned envs exist. It reminds a resumed
   session to verify via `agent-env.sh run <name> -- <cmd>` (the proactive companion
@@ -636,10 +702,13 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   section (the thin always-loaded layer).
 - [`references/stacks.md`](references/stacks.md): per-knob and per-stack
   adaptation detail (Node, Laravel, Python, Rust), OS/CoW notes, and the gotchas.
-  Read this before adapting the script to a new project.
+  Read this before writing a project's config.
 - [`references/laravel.md`](references/laravel.md): a complete worked Laravel/PHP
-  per-project section (serve via `artisan serve` not Herd, SQLite/MySQL/Redis
+  project config (serve via `artisan serve` not Herd, SQLite/MySQL/Redis
   isolation, queue worker, per-env DB create + drop), plus dogfooding targets.
+- [`references/shopify.md`](references/shopify.md): the no-engine playbook for
+  Shopify themes and other no-local-state stacks (a worktree plus a per-env
+  dev-server port; create, serve, verify, operate, tear down).
 - [`assets/agent-env-wp.sh`](assets/agent-env-wp.sh): a WordPress-specific flow for
   when the git repo is a theme/plugin inside a full install, the env clones the
   whole WP install and nests the repo as a worktree. Reuses the engine's primitives.

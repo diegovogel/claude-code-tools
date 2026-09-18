@@ -15,6 +15,7 @@
 #   agent-env.sh provision [path]          # provision an existing worktree (default: cwd)
 #   agent-env.sh run <name|path> -- <cmd...>  # run a command IN the env, cwd-independent
 #   agent-env.sh serve <name|path> [--main-ports]
+#   agent-env.sh view <name|path>          # serve if needed, print the env's URL, open it in a browser (AGENT_ENV_NO_OPEN=1 prints only)
 #   agent-env.sh stop <name|path>
 #   agent-env.sh list
 #   agent-env.sh destroy <name|path> [--force]  # deletes the branch when its commits exist elsewhere
@@ -24,10 +25,17 @@
 # Inside an env, ALWAYS use `serve`, never the main dev command, which is
 # pinned to the main checkout's ports and would collide.
 #
-# ADAPTING THIS SCRIPT TO A NEW PROJECT: edit only the PER-PROJECT SECTION
-# below (the CONFIG block + the project_* functions). The ENGINE beneath it is
-# stack-agnostic and can be copied verbatim. See the skill's references/stacks.md
-# for per-stack guidance (which dep dirs to clone, ports, services, etc.).
+# ONE ENGINE, MANY PROJECTS. This file is the only copy of the engine; it lives
+# in the agent-environments skill and is never copied into a repo. A repo
+# carries a ~30-line shim at scripts/agent-env.sh (rendered from the skill's
+# assets/shim.sh) that sets AGENT_ENV_PROJECT and execs this file, and the
+# project's own knobs (the CONFIG scalars + the project_* hook functions) live
+# OUTSIDE the repo in ~/.claude/agent-environments/<project>/project.sh, sourced
+# below. An engine fix therefore lands in every project at once instead of
+# being propagated by hand into each repo's copy; a repo is deliberately not
+# self-contained, and the shim's error message tells a machine without the
+# skill exactly what is missing. Per-stack guidance for writing a config
+# (which dep dirs to clone, ports, services): the skill's references/stacks.md.
 
 set -euo pipefail
 
@@ -53,144 +61,67 @@ clone_dir() {
 }
 
 # ===========================================================================
-# >>> PER-PROJECT SECTION: edit everything between here and "END PER-PROJECT".
-# The values below are a worked example for a Vite (client) + Express (server)
-# Node project. Replace them with your stack's equivalents.
+# PROJECT CONFIG. Everything that varies per project (the CONFIG scalars and
+# the project_* hook functions) is sourced from
+#   ${AGENT_ENV_CONFIG_DIR:-$HOME/.claude/agent-environments}/$AGENT_ENV_PROJECT/project.sh
+# The shim sets AGENT_ENV_PROJECT; AGENT_ENV_CONFIG_DIR exists so tests can point
+# at a synthetic directory. Defaults are set BEFORE sourcing, so a config only
+# has to state what differs, and a config that restates everything (a fenced
+# section moved out of an older in-repo fork) works unchanged. Sourcing runs
+# under set -euo pipefail, and the config may run top-level statements (extend
+# PATH, define a helper); that is intended. Worked example: assets/project.example.sh.
 # ===========================================================================
 
-# --- CONFIG -----------------------------------------------------------------
-WORKTREES_SUBDIR=".claude/worktrees"   # where envs live (keep as the runtime's
-                                       # own worktree dir unless non-Claude
-                                       # agents need them elsewhere)
+# --- defaults; a config may override any of them ------------------------------
+WORKTREES_SUBDIR=".claude/worktrees"   # where envs live (the runtime's own
+                                       # worktree dir, so Claude can EnterWorktree)
 CANONICAL_BRANCH_PREFIX="worktree-"    # must match the runtime's EnterWorktree
-                                       # branch prefix so adoption renames
-                                       # nothing; verify with `git branch
-                                       # --show-current` after an EnterWorktree
-PORT_BASE=13000                        # env ports start here (main/takeover = PORT_BASE .. +PORTS_PER_ENV-1).
-                                       # MACHINE-GLOBAL: the slot registry dedups ports only
-                                       # WITHIN this repo; two repos sharing this base collide
-                                       # on localhost. Give each repo a distinct base (stacks.md).
-PORT_STRIDE=2                         # spacing between a slot's ports; must be >= PORTS_PER_ENV or
-                                       # adjacent slots overlap. Defaults to exactly PORTS_PER_ENV
-                                       # (densest, no wasted ports); raise only for headroom.
-PORTS_PER_ENV=2                        # distinct localhost ports each env reserves
-MAIN_DEV_CMD="npm run dev"             # named in messages and the in-env guard
-LOCKFILES="package-lock.json"          # lockfiles whose change in a pull triggers
-                                       # project_sync_deps (space-separated, repo-root-
-                                       # relative; e.g. "composer.lock package-lock.json")
+                                       # branch prefix so adoption renames nothing
+PORT_STRIDE=""                         # spacing between a slot's ports; empty =
+                                       # exactly PORTS_PER_ENV (densest); must be
+                                       # >= PORTS_PER_ENV or adjacent slots overlap
+LOCKFILES=""                           # lockfiles whose change in a pull triggers
+                                       # project_sync_deps (space-separated,
+                                       # repo-root-relative)
+MAIN_DEV_CMD="the main dev command"    # named in messages
+# Required, deliberately without a default: PORT_BASE (machine-global, so every
+# repo needs a distinct band; references/stacks.md) and PORTS_PER_ENV.
+PORT_BASE=""
+PORTS_PER_ENV=""
 
-# --- seed an env's files: dependencies (CoW), lockfile reconcile, local certs
-# Deps are the big win: a CoW clone is ~instant and near-zero disk vs. a fresh
-# install. Reconcile against the env branch's own lockfile so a branch that
-# changed deps still gets them. Do NOT copy secrets that two running servers
-# would fight over (e.g. a shared OAuth refresh-token store), let each env
-# acquire its own.
-project_seed_env_files() {
-  local main="$1" env="$2"
-  if [[ ! -d "$env/node_modules" ]]; then
-    if [[ -d "$main/node_modules" ]]; then
-      say "cloning node_modules (copy-on-write)..."
-      if ! clone_dir "$main/node_modules" "$env/node_modules"; then
-        rm -rf "$env/node_modules"
-        warn "clonefile failed; falling back to npm ci (slower)"
-        ( cd "$env" && npm ci --no-audit --no-fund )
-      fi
-    else
-      warn "main checkout has no node_modules; running npm ci in the env"
-      ( cd "$env" && npm ci --no-audit --no-fund )
-    fi
-  fi
-  if ! cmp -s "$main/package-lock.json" "$env/package-lock.json" 2>/dev/null; then
-    say "package-lock.json differs from main; running npm install to reconcile"
-    ( cd "$env" && npm install --no-audit --no-fund )
-  fi
-  # Optional local artifacts (e.g. dev TLS certs). Skip if your stack has none.
-  if [[ -d "$main/certs" && ! -d "$env/certs" ]]; then
-    clone_dir "$main/certs" "$env/certs" || cp -R "$main/certs" "$env/certs"
-  fi
-}
+# Optional hooks: no-ops unless the config defines them (the oldest configs
+# predate some of these). The required hooks have no default and the engine
+# refuses to run without them: project_seed_env_files, project_env_port_lines,
+# project_start_servers.
+project_sync_deps()       { :; }
+project_main_ports()      { :; }
+project_health_urls()     { :; }
+project_after_provision() { :; }
+project_pre_destroy()     { :; }
 
-# --- reconcile THIS checkout's dependencies after a pull changed a lockfile.
-# Run by the post-merge/post-rewrite git hooks (installed by `install-hooks`,
-# triggered via `sync-deps`) in whatever checkout pulled — most importantly the
-# main checkout, which otherwise ends up with a package.json/composer.lock that
-# lists a dependency nobody installed (the recurring trap when an env's PR that
-# added a package merges into main). Runs with cwd = repo root. Mirror your
-# stack's install command; keep it idempotent (a no-op when already in sync).
-# Multi-tool stacks chain commands here, e.g. `composer install && npm install`.
-project_sync_deps() {
-  npm install --no-audit --no-fund
-}
-
-# --- emit the config-file managed-block lines for this env. Args:
-#       <env-name> <slot> <port1> <port2> ...
-# Use the env name when a value must be unique per env (e.g. a per-env database
-# name). Here two distinct ports back three keys (the proxy target is read from
-# DEV_API_PORT so it can't collide with a prod-like API_PORT in the base .env).
-project_env_port_lines() {
-  local name="$1" slot="$2"; shift 2
-  local vite_port="$1" api_port="$2"
-  printf 'VITE_PORT=%s\n'    "$vite_port"
-  printf 'API_PORT=%s\n'     "$api_port"
-  printf 'DEV_API_PORT=%s\n' "$api_port"
-}
-
-# --- the fixed port set for "takeover QA": serving an env on the main ports so a
-# fixed external integration (a sideloaded manifest, an OAuth redirect URI, a
-# webhook) that is pinned to those ports exercises the env's branch. Echo
-# nothing if your project has no fixed-address integration; --main-ports then
-# errors instead of silently doing the wrong thing.
-project_main_ports() {
-  echo "$PORT_BASE $((PORT_BASE + 1))"
-}
-
-# --- launch the env's dev processes in the background, writing one PID file per
-# process into .agent-env/. The engine kills every .agent-env/*.pid on stop, so
-# the file names are up to you. Run from inside a subshell (the engine sets `set
-# -m` so each job gets its own process group and stop can kill whole trees).
-project_start_servers() {
-  local env="$1" vite_port="$2" api_port="$3"
-  cd "$env"
-  API_PORT="$api_port" nohup npx tsup src/middle-tier/app.ts --format cjs \
-    --out-dir dist --watch --onSuccess "node dist/app.js" \
-    >>logs/dev-express.log 2>&1 &
-  echo $! >.agent-env/express.pid
-  VITE_PORT="$vite_port" DEV_API_PORT="$api_port" nohup npx vite \
-    >>logs/dev-vite.log 2>&1 &
-  echo $! >.agent-env/vite.pid
-}
-
-# --- health checks the engine polls before declaring "up". One per line:
-#       label|url|timeout_seconds
-project_health_urls() {
-  local vite_port="$1" api_port="$2"
-  echo "Vite|https://localhost:$vite_port/taskpane.html|60"
-  echo "Express|https://localhost:$api_port/api/auth/validate|90"
-}
-
-# --- run after files are seeded and ports written. Args: <env-path> <name> <slot>.
-# Create/migrate/seed a per-env database, warm a cache, etc. This stack keeps all
-# state in remote services, so there is nothing to do. This is the slot for
-# stateful-service isolation in other stacks (see references/stacks.md and the
-# Laravel worked example in references/laravel.md).
-project_after_provision() {
-  local env="$1" name="$2" slot="$3"
-  :
-}
-
-# --- run during `destroy`, after the dirty/unpushed guards pass but before the
-# worktree is removed. Args: <env-path> <name> <slot>. Tear down per-env state
-# the worktree itself doesn't hold (drop a per-env database, delete a cache
-# namespace, etc.). SQLite/file state lives inside the worktree and is removed
-# with it, so it needs nothing here. Keep this safe to run more than once.
-project_pre_destroy() {
-  local env="$1" name="$2" slot="$3"
-  :
-}
-
-# ===========================================================================
-# END PER-PROJECT SECTION. The engine below is stack-agnostic.
-# ===========================================================================
+# --- load and validate, before any subcommand runs ----------------------------
+[[ -n "${AGENT_ENV_PROJECT:-}" ]] \
+  || die "AGENT_ENV_PROJECT is not set. This engine is normally run through the repo's shim (scripts/agent-env.sh), which sets it; see the agent-environments skill, SKILL.md \"Setting up\""
+# The name is interpolated into a path that is then sourced as shell, so it is
+# restricted the same way the WordPress engine restricts env names.
+[[ "$AGENT_ENV_PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  || die "invalid AGENT_ENV_PROJECT '$AGENT_ENV_PROJECT' (allowed: [A-Za-z0-9._-], starting with a letter or digit)"
+AGENT_ENV_CONFIG="${AGENT_ENV_CONFIG_DIR:-$HOME/.claude/agent-environments}/$AGENT_ENV_PROJECT/project.sh"
+[[ -f "$AGENT_ENV_CONFIG" ]] \
+  || die "no project config for '$AGENT_ENV_PROJECT' at $AGENT_ENV_CONFIG. Create it from assets/project.example.sh in the agent-environments skill (SKILL.md, \"Setting up\", step 3)"
+# shellcheck disable=SC1090
+source "$AGENT_ENV_CONFIG"
+[[ -n "$PORT_STRIDE" || -z "$PORTS_PER_ENV" ]] || PORT_STRIDE="$PORTS_PER_ENV"
+missing=""
+for v in PORT_BASE PORTS_PER_ENV; do
+  [[ -n "${!v:-}" ]] || missing+=$'\n'"  $v (required scalar, unset or empty)"
+done
+for v in project_seed_env_files project_env_port_lines project_start_servers; do
+  declare -F "$v" >/dev/null || missing+=$'\n'"  $v (required function, not defined)"
+done
+[[ -z "$missing" ]] \
+  || die "project config $AGENT_ENV_CONFIG is incomplete:$missing"$'\n'"  (assets/project.example.sh in the agent-environments skill shows the full shape)"
+unset missing v
 
 MARKER_START="# >>> agent-env managed block >>>"
 MARKER_END="# <<< agent-env managed block <<<"
@@ -579,6 +510,44 @@ cmd_stop() {
 }
 
 # ---------------------------------------------------------------------------
+# view: serve the env if it is not already, print its URL, then open that URL
+# in a browser (macOS `open`, else `xdg-open`). For a person who wants to look
+# at an env's running app (verify a branch before a PR) without remembering
+# ports or start commands. The URL is the first project_health_urls entry when
+# the config lists one (the page the project itself calls "up", scheme and path
+# included), else http://localhost:<first port>/. AGENT_ENV_NO_OPEN=1 skips the
+# browser launch so tests and headless runs can exercise everything else.
+# ---------------------------------------------------------------------------
+cmd_view() {
+  local main env name url
+  main=$(main_root)
+  [[ -n "${1:-}" ]] || die "usage: agent-env.sh view <name|path>"
+  env=$(resolve_env "$1" "$main")
+  require_not_main "$env" "$main"
+  [[ -f "$env/.agent-env/ports.env" ]] || die "env not provisioned; run: agent-env.sh provision $env"
+  # shellcheck disable=SC1091
+  source "$env/.agent-env/ports.env"
+  name="$AGENT_ENV_NAME"
+
+  if any_pid_alive "$env"; then
+    say "'$name' is already serving"
+  else
+    cmd_serve "$env"
+  fi
+
+  local ports=()
+  read -ra ports <<<"$AGENT_ENV_PORTS"
+  url=$(project_health_urls "${ports[@]}" | awk -F'|' '$2 != "" {print $2; exit}')
+  [[ -n "$url" ]] || url="http://localhost:${ports[0]}/"
+  say "view '$name' at: $url"
+  [[ -z "${AGENT_ENV_NO_OPEN:-}" ]] || return 0
+  case "$(uname -s)" in
+    Darwin) open "$url" >/dev/null 2>&1 || true ;;
+    *)      xdg-open "$url" >/dev/null 2>&1 || true ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # list: every worktree with branch / dirty / unpushed / ports / serving.
 # ---------------------------------------------------------------------------
 cmd_list() {
@@ -624,7 +593,7 @@ cmd_destroy() {
   # deleted worktree cleanly. Move the session to the main checkout first.
   local here envp; here=$(pwd -P); envp=$(cd "$env" 2>/dev/null && pwd -P || printf '%s' "$env")
   [[ "$here" != "$envp" && "$here" != "$envp"/* ]] \
-    || die "destroy must run from outside the worktree it removes. Leave it first (ExitWorktree with action keep, or move the session to $main), then rerun: $main/scripts/$(basename "$0") destroy $name"
+    || die "destroy must run from outside the worktree it removes. Leave it first (ExitWorktree with action keep, or move the session to $main), then rerun: $main/scripts/$(basename "${AGENT_ENV_SHIM:-$0}") destroy $name"
 
   cmd_stop "$env" >/dev/null 2>&1 || true
 
@@ -690,7 +659,7 @@ cmd_run() {
 # a manifest listing a dependency nobody installed. The hooks are generic across
 # stacks: they just call back into `sync-deps`, which runs the per-project
 # project_sync_deps. So adapting to a new stack means filling project_sync_deps +
-# LOCKFILES in the per-project section, nothing here.
+# LOCKFILES in the project config, nothing here.
 # ---------------------------------------------------------------------------
 
 # Write a hook script (post-merge / post-rewrite share one body) that delegates
@@ -700,8 +669,9 @@ write_git_hook() {  # dest-path
 #!/bin/sh
 # Installed by scripts/agent-env.sh (install-hooks). After a merge/pull/rebase
 # that changed a lockfile, reconcile this checkout's dependencies so the manifest
-# can't list a package nobody installed. The actual install is the per-project
-# section's project_sync_deps; this just delegates so the logic lives in one place.
+# can't list a package nobody installed. The actual install is the project
+# config's project_sync_deps (outside the repo); this just delegates so the
+# logic lives in one place.
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -x "$root/scripts/agent-env.sh" ] || exit 0
 exec "$root/scripts/agent-env.sh" sync-deps
@@ -727,7 +697,7 @@ cmd_install_hooks() {
       git -C "$main" config core.hooksPath .githooks
       [[ -n "$quiet" ]] || say "git hooks installed (.githooks); core.hooksPath set"
       ;;
-    ".githooks") : ;;  # already active
+    ".githooks"|"$main/.githooks") : ;;  # already active
     *)
       warn "core.hooksPath is '$cur'; wrote .githooks/{post-merge,post-rewrite} but left it unchanged — activate by setting core.hooksPath=.githooks or chaining the hooks from your existing hooks dir" ;;
   esac
@@ -767,6 +737,7 @@ case "$cmd" in
   provision) cmd_provision "$@" ;;
   run)       cmd_run "$@" ;;
   serve)     cmd_serve "$@" ;;
+  view)      cmd_view "$@" ;;
   stop)      cmd_stop "$@" ;;
   list)      cmd_list "$@" ;;
   destroy)   cmd_destroy "$@" ;;

@@ -15,6 +15,13 @@ with a unique port set, and a logs dir. <ONE LINE on stateful services: e.g.
 environment." OR "Each env also gets its own database `<scheme>_<name>` and a
 queue worker." >
 
+- **The engine and this project's env config live outside the repo.**
+  `scripts/agent-env.sh` is a shim: it execs the engine in the
+  `agent-environments` skill (`~/.claude/skills/agent-environments/assets/`)
+  and the project's config (ports, hooks, dependency dirs) is
+  `~/.claude/agent-environments/<NAME>/project.sh`. Change env behavior in
+  the config, never in the shim; a machine without the skill gets a clear
+  error from the shim and nothing else in the project depends on it.
 - **Create your own env mid-session**: `EnterWorktree` with a task-derived name,
   then `./scripts/agent-env.sh provision`. Or adopt a pre-built env via
   `EnterWorktree` with `path: .claude/worktrees/<name>` (built with
@@ -28,7 +35,8 @@ queue worker." >
   env takes the lowest free slot; `destroy` frees it for reuse.
 - **Inside an env, NEVER run `<MAIN_DEV_CMD, e.g. npm run dev>`**: it is pinned
   to the main checkout's ports and collides. This is enforced by
-  `<scripts/guard-not-in-env.cjs>`. Use `./scripts/agent-env.sh serve <name>`
+  `./scripts/agent-env.sh guard`, the first step of the dev command. Use
+  `./scripts/agent-env.sh serve <name>`
   (background, PID-managed, health-checked; logs in the env's `logs/`). Most
   tasks need only `<TEST_CMD>` and `<BUILD_CMD>`; only `serve` when you need a
   live server.
