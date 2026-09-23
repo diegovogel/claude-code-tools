@@ -213,6 +213,14 @@ Browser-side Perspective sessions cache the view bundle. After any view edit
 (even after Designer is saved), tell the user to hard-refresh the session
 tab (Cmd+Shift+R) or they'll keep seeing the old behavior. _Discovered: 2026-05-21_
 
+**But a reload does NOT give you fresh view state** (8.3.7, verified 2026-09-23). The tab keeps
+its page id in sessionStorage, so a reload reattaches to the SAME page: table filter text,
+selections, `view.custom` data that only refreshes on a message, and dock form instances all
+survive. Running sessions also auto-apply a Designer save about 30 s later (a "Project Update"
+toast) without resetting that state. To test against a fresh instance, open a **new tab** (new
+page, same session and login) or navigate to another page and back. This matters when
+reproducing a defect: a "fixed after reload" result can just be the old instance.
+
 ### Asterisk = unsaved local change
 A `*` after a resource name in Designer's project browser (e.g. `onEditCellCommit*`)
 means Designer has unsaved local edits to that resource. While the `*` is
@@ -240,6 +248,31 @@ named queries / views from disk. _Discovered: 2026-05-21_
 ---
 
 ## Perspective views, components, and bindings
+
+### An embedded view KEEPS a param's old value when the new params object omits that key
+**Symptom:** a form embedded through a generic dock host (an `ia.display.view` whose `props.params` is
+bound to a `viewParams` object passed to `openDock`) shows data from an earlier open. Verified on 8.3.7:
+open the form with `{'assetno': 'new', 'prefill': {...}}`, then open it with `{'assetno': 'X'}` (no
+`prefill` key). The form's `params.prefill` still holds the first object; it does NOT revert to the
+view's default `{}`. Any later switch back to `'new'` re-applies the stale prefill. `openDock(id)` with
+no params also leaves the embedded view's params as they were.
+
+**Fix:** every opener that the param matters for must pass it explicitly, including the "empty" case
+(`'prefill': {}` from the plain New button). Or make consumers ignore the param where it doesn't apply
+(an edit ignores prefill). Don't rely on omitted keys resetting to defaults. Same family as the
+`newClick` latch: change detection is by value, so pass a millisecond timestamp when an open must
+always refresh. _Discovered: 2026-09-22_
+
+### A view that writes its own INPUT param desyncs from its host: resending the same value is a no-op
+**Symptom:** a dock form opened for record X shows a blank "new" form the second time X is opened.
+The form's Cancel and save handlers did `self.view.params.assetno='new'` to reset themselves. The
+host's `props.params.assetno` still says X, so the next open passes X again, nothing changes on the
+host side, nothing is pushed, and the form stays on `'new'` (reproduced on an asset form on 2026-09-23,
+after Cancel and after a successful Update).
+
+**Fix:** never reset an input param from inside the view; reset `view.custom` state instead, and have
+openers pass a millisecond `newClick`-style param whose onChange refreshes the bindings, so reopening
+the same record always reloads it. _Discovered: 2026-09-23_
 
 ### `event.row` on table events is a row INDEX, not a row dict
 For the Perspective Table's `onEditCellCommit` (and likely other cell events),
@@ -762,6 +795,35 @@ _Discovered: 2026-05-21_
 
 ## Project scripts (Jython)
 
+### Pasting into a NEW event script doubles the first line's indent: select all before pasting
+**Symptom:** a script pasted into a brand-new component event (e.g. `onActionPerformed` on a just-added
+Button) is saved with the first line indented one level deeper than the rest (`\t\tfrom ...` then
+`\tvariant = ...`). The button then fails with an IndentationError. Scripts pasted over existing code look
+fine, which hides the pattern.
+
+**Root cause:** the editor for a new event script opens with the cursor on an already-indented empty body
+line. Pasting a snippet that carries its own leading tab adds it on top of that indent, and only the first
+line is affected. The snippet's tabs are not the problem.
+
+**Fix:** always press Cmd/Ctrl+A in the script editor before pasting, including in a brand-new script, so
+the paste replaces the seeded indent. When handing someone paste-in instructions, say "select all, then
+paste" for every script. To check saved results on disk, compare the leading whitespace of line 1 with
+line 2 of each `script` string in the view.json. _Discovered: 2026-09-22_
+
+### Script Console writes fail with "Designer has incorrect comm mode" (Comm Read-Only is the default)
+**Symptom:** in the Designer Script Console, SELECT named queries and reads work, but a stored-procedure call
+(`system.db.execSProcCall`), an UPDATE/INSERT query or a tag write dies with a long Java trace ending in
+`RpcException: Designer has incorrect comm mode, unable to perform gateway operation`. It reads like a broken
+script, and a `callProc` helper looks guilty because it is the first frame.
+
+**Root cause:** the Designer starts in **Comm Read-Only**: SELECTs and subscriptions pass, every write is
+refused at the gateway RPC layer. A stored-procedure call counts as a write even if the procedure only reads.
+Nothing reaches the database, so there is nothing to clean up.
+
+**Fix:** switch the Designer to **Comm Read/Write** (the communication-mode buttons in the toolbar) before
+running write tests from the console, and back to Read-Only afterwards. Perspective sessions and gateway
+scripts are unaffected: comm mode is per Designer instance. _Discovered: 2026-09-21_
+
 ### Jython 2.x, not Python 3
 Ignition project scripts run on Jython 2.x. **No** f-strings, **no** PEP 604
 union types (`int | None`), **no** walrus operator, **no** `dataclasses`,
@@ -822,6 +884,39 @@ committed passwords. There is no plaintext seeding in 8.3 config.json; the
 only programmatic route is `POST /data/api/v1/encryption/encrypt` with a
 write-scope API key, which itself requires Gateway UI setup first.
 _Discovered: 2026-08-03_
+
+### Changing a DB login's password faults its connections LATER, not now
+**Symptom:** after a database user's password changes (`ALTER ROLE ...
+PASSWORD`, `ALTER LOGIN ...`), every Ignition connection that logs in as that
+user still shows VALID, so nothing looks broken. They fault later, typically on
+the next gateway restart. The reverse bites too: saving a connection in the
+Gateway UI reinstalls its pool at once, so a mistyped password there faults
+immediately. Before blaming a second FAULTED row on the same save, check that
+its host is reachable from this machine at all (`route -n get <ip>` on macOS);
+dev laptops often carry enabled connections to plant servers they can't reach.
+
+**Root cause:** the database checks the password only when a session opens, and
+the pool keeps reusing sessions opened before the change. The status stays
+VALID until the pool needs a new session.
+
+**Fix:** after any DB-side password change, re-save the new password in EVERY
+connection that uses that login, before the next restart. Find them with
+`grep -l '"username": "<user>"' config/resources/*/ignition/database-connection/*/config.json`
+(skip any whose `resource.json` has `"enabled": false`). To tell which side is
+wrong, read the database's own log: MSSQL writes `Reason: Password did not
+match` with the gateway's IP, Postgres writes `password authentication failed`.
+`git restore` of the connection's `config.json` + `resource.json` undoes a bad
+Gateway UI save (the committed ciphertext still decrypts on the same gateway
+key), but 8.3.7 does NOT reload the restored file live: no reinstall a minute
+later. For an immediate fix, re-type the password in the UI, then `git restore`
+to drop the diff; the restored file loads on the next restart.
+
+**Tip:** an 8.3 embedded secret is a JWE whose header says `"zip":"DEF"`, and
+AES-GCM preserves length, so the base64url-decoded `ciphertext` length is the
+DEFLATEd password length: n + 2 bytes for a short ASCII password without
+repeats. Enough to check whether a saved value could be the expected password
+without decrypting it.
+_Discovered: 2026-09-21_
 
 ### `GATEWAY_ADMIN_PASSWORD` is ignored on a reused data volume — reset via `gwcmd.sh -p`
 The Docker image's `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD` env vars
