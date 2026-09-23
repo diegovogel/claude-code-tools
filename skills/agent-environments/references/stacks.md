@@ -65,6 +65,13 @@ Reconcile against the **env branch's own lockfile**, not main's, a branch that
 changed dependencies must get them. The example does this with a `cmp` of the
 lockfile then a conditional install.
 
+**Give `package.json` a `name` at setup (any stack with npm, Laravel included).**
+Without one, the first `npm install`/`npm update` in an env rewrites the root
+`name` in `package-lock.json` to the worktree directory name. A commit then
+carries that into main. Check this during setup, and add `"name": "<repo>"` if it
+is missing; the lock mirrors it into its root package entry on the next install.
+Detail under [Gotchas](#gotchas-that-bite).
+
 ### Keeping the main checkout in sync after a pull (`project_sync_deps`)
 
 `project_seed_env_files` keeps *envs* in sync, but the **main checkout** drifts
@@ -394,6 +401,8 @@ the shim, not an old Node guard, refused. Confirmed live in a Laravel app.
   `.claude/worktrees/foo` writes `"name": "foo"`. Fix once by giving the manifest an
   explicit `name`. (Cargo, Composer, uv, and Poetry read the name from an explicit
   manifest field, so they don't drift — it's the directory-inferred ones to watch.)
+  Seen live 2026-09-23 in a converted Laravel repo whose `package.json` had no
+  `name`: a plain `npm update <pkg>` in an env did it too, not just `install`.
 - **An app with async graceful shutdown holds its port for a beat after `stop`.**
   `stop` signals the process group, but a server that drains connections releases
   its socket a second or two later, so an immediate re-`serve` can hit "port in
