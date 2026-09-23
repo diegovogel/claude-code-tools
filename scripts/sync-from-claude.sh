@@ -37,7 +37,6 @@ PATHS=(
 
   # Skills
   skills/agent-environments
-  skills/working-with-ignition-designer
   skills/brainstorm-with-panel
   skills/security-review-plus
 

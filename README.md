@@ -2,7 +2,7 @@
 
 A collection of tools I've made for working with Claude Code. They define and automate workflows and/or help Claude do things better (more predictably, faster, more thoroughly, etc.).
 
-All tools were born out of a felt need. For example, the commands automate prompts or workflows I was naturally using on a daily basis. All tools have been hardened over time as I encountered edge cases, and continue to be improved with use. With the exception of the Ignition Designer skill, all tools were created with web and software development in mind, though they may apply to other contexts.
+All tools were born out of a felt need. For example, the commands automate prompts or workflows I was naturally using on a daily basis. All tools have been hardened over time as I encountered edge cases, and continue to be improved with use. All tools were created with web and software development in mind, though they may apply to other contexts.
 
 I built these tools collaboratively with Claude. I designed each one in detail, Claude wrote the files, and together we improved them through real use.
 
@@ -21,7 +21,6 @@ Some tools require additional dependencies as noted in their details below.
 * [session-wrapup](#command-session-wrapup): finds valuable information in a session and saves it for future reference by Claude.
 
 ### Skills
-* [Ignition Designer](#skill-working-with-ignition-designer): a collection of tips and workflows that improve Claude's ability to build and debug [Ignition Perspective](https://inductiveautomation.com/ignition/modules/perspective) projects.
 * [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments, and defines the quality workflow Claude runs in one before a PR.
 * [brainstorm-with-panel](#skill-brainstorm-with-panel): a phased, multi-agent workflow for generating and evaluating creative solutions to hard problems.
 * [security-review-plus](#skill-security-review-plus): runs a security review that includes a curated checklist of security tips from the excellent [Securing Laravel](https://securinglaravel.com/) newsletter from [Stephen Rees-Carter](https://stephenreescarter.net/) (go sign up!).
@@ -102,29 +101,6 @@ The GitHub bot version is still in this repo: [pr-with-codex](commands/pr-with-c
 * Filters for signal: lessons learned, architecture decisions, workarounds, and outside context. Not session minutiae.
 * Walks docs referenced from `CLAUDE.md`, not just `CLAUDE.md` itself. Those linked docs are usually where drift hides.
 * Prunes outdated entries as well as adding new ones, so memory stays trustworthy over time instead of accumulating cruft.
-
-### Skill: `working-with-ignition-designer`
-
-[View source](skills/working-with-ignition-designer)
-
-**Why it exists:** Ignition is a niche industrial automation platform with a relatively small training corpus compared to popular web frameworks. When working in Ignition, Claude will commonly sound confident but get stuck or make mistakes. Additionally, collaboration is a bit trickier compared to software projects because Claude edits files directly while the human uses Designer to edit the same files.
-
-**What it does:** this skill does three things to help Claude work with Ignition better:
-1. Provides a growing list of common quirks and gotchas that I've encountered while working with Ignition.
-2. Instructs Claude to check Ignition's excellent docs when it's unsure about something or stuck.
-3. Provides a debugging framework for Perspective views, which includes a troubleshooting methodology and a headless browser.
-
-The skill also self-improves: when Claude hits a new gotcha that meets the inclusion criteria, it appends it to the gotchas file mid-session.
-
-**Highlights:**
-* Borrowed from my web dev background, a Playwright headless driver collapses debugging cycles from ~30-60s of human-driven clicking to ~5s of automated work. Claude observes, acts, and observes again without me touching the browser.
-* Strict "one failed attempt = stop and read docs" rule. Prevents the time-consuming guess-and-retry loop that LLMs love to fall into.
-* Self-improving with explicit inclusion criteria for new gotchas (recurrence-likely, cross-project applicable, not obvious from docs).
-* Enforces a tight feedback loop when debugging. By default, Claude tends to make big batches of changes before verifying, which are hard to debug when something breaks. This skill forces Claude to make small changes and verify at each step. Combined with the Playwright driver, this has allowed Claude to fix problems in minutes that previously took hours.
-
-**Dependencies:**
-* Playwright
-* Python venv
 
 ### Skill: `agent-environments`
 
