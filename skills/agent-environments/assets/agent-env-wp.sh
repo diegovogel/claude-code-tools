@@ -247,7 +247,7 @@ free_slot() { # repo site name  (the env's slot and every wp-env slot of its wor
 }
 
 # .wp-env.override.json is wp-env's own per-checkout local override, and what
-# setup_wp_env writes; most WP repos gitignore it already (Birdboar starters
+# setup_wp_env writes; most WP repos gitignore it already (some starters
 # ignore every dotfile), the exclude covers the ones that do not.
 exclude_artifacts() { # repo
   mkdir -p "$1/.git/info"

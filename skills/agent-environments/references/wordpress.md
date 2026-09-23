@@ -83,8 +83,8 @@ the interactive shell adds. Every hook that calls npm (a `project_after_worktree
 build step, `project_sync_deps`) therefore inherits the caller's PATH: present in
 Claude's Bash and a terminal, absent from a GUI git client firing the post-merge
 hook, where `npm install` fails with "command not found". A config that must work
-there appends nvm's node bin at top level (a `_path_append`, the pattern
-walkingman's config uses for Herd). Proof under a bare PATH:
+there appends nvm's node bin at top level (a `_path_append`, the same pattern a
+config uses to reach Herd). Proof under a bare PATH:
 `env -i HOME="$HOME" PATH=/usr/bin:/bin ./scripts/agent-env-wp.sh list` must
 succeed, and node/npm are expected to be missing there.
 
@@ -191,8 +191,9 @@ root), a fresh worktree has none and the env renders unstyled — and any e2e sp
 that loads a compiled file from disk fails. Put the one-shot compile in the
 per-project `project_after_worktree`, which runs with cwd = the worktree once
 its deps are in place, once for the target repo and once per sibling; dispatch
-on the install-relative path when they differ (tab-handbook's theme runs
-`node_modules/.bin/sass scss:.`, its plugin `sass scss/style.scss:dist/style.css`).
+on the install-relative path when they differ (e.g. a theme that runs
+`node_modules/.bin/sass scss:.` beside a plugin that runs
+`sass scss/style.scss:dist/style.css`).
 Use `node_modules/.bin/<tool>` there, and also when you run a compile by hand in
 Bash: a package-install gate hook denies any Bash call whose command line
 contains `npx`, even `npx --no-install` (the hook reads the command line, not
@@ -267,7 +268,7 @@ the next command in every env, old or new.
 
 A feature that spans both custom repos uses one env. Each repo's config lists
 the other in `SIBLING_REPOS` (install-relative, e.g.
-`wp-content/plugins/tab-handbook-plugin`), and `create` then swaps that repo's
+`wp-content/plugins/<plugin-dir>`), and `create` then swaps that repo's
 CoW snapshot for a worktree of its main checkout on the same `worktree-<name>`
 branch, from whatever that checkout has checked out (announced, with a warning
 if it is dirty), installs its deps the same way and runs
@@ -293,7 +294,7 @@ them.
 
 ## wp-env inside an env: the integration and e2e suites
 
-Birdboar WP repos run their integration suite (plugin: Pest shelling out to
+The WP repos this was built for run their integration suite (plugin: Pest shelling out to
 `wp-env run cli wp ...` plus `curl` against the stack) and e2e suite (theme:
 Playwright) against **wp-env**, `@wordpress/env`'s Dockerised WordPress, booted
 from the repo's `.wp-env.json`. That stack stays the test substrate inside an
@@ -467,7 +468,7 @@ belonged to envs long gone, all reclaimed in 12s; the two live main-checkout
 stacks were untouched.
 
 Load: each stack is Apache+PHP plus MariaDB (twice with the tests environment
-on; the tab-handbook repos disable it). Three envs of theme plus plugin is six
+on; repos can disable it). Three envs of theme plus plugin is six
 stacks, which this Mac carries; the suites are the bottleneck, not the ports,
 and the theme's Playwright config already caps workers because one container
 serves all of them.
@@ -492,18 +493,15 @@ serves all of them.
 
 Two repos exercised end to end (create / serve / stop / destroy), source + DB left
 untouched:
-- **Theme, http, composer+npm** (tough-bible-stuff-theme): green; serve 2s, home 200.
-- **Plugin, https, page-builder (Beaver Builder), 2.1 GB** (spendthrift-tickets-plugin):
-  green; plugin-rel path, https->http search-replace, composer+npm, serve 2s, home 200.
+- **Theme, http, composer+npm**: green; serve 2s, home 200.
+- **Plugin, https, page-builder (Beaver Builder), 2.1 GB**: green; plugin-rel
+  path, https->http search-replace, composer+npm, serve 2s, home 200.
 
-Also available as targets: excel-engineering/firstscribe (no build, 1.8 GB, https) and
-tab-handbook (theme + plugin, http).
-
-wp-env ports (2026-09-09, tab-handbook, theme + plugin in one env): `create`
+wp-env ports (2026-09-09, a theme + plugin site in one env): `create`
 took 27s and handed out slots 1 (wp server 18302), 2 (plugin wp-env 18304)
 and 3 (theme wp-env 18306). The env's plugin wp-env booted in 160s (first image
 build) beside the main checkout's on 8888, in two compose projects
-(`wp-env-tab-handbook-plugin-82eec0d8` and `-2eef1770`); the theme's followed on
+(`wp-env-<plugin-dir>-<hash>`, one hash per config path); the theme's followed on
 18306 in 46s and reported `home` as that URL, so the e2e seeder ran. The plugin's
 integration suite passed in the env (27 tests, 72s) while the main checkout's
 copy passed against 8888 at the same time, and the theme's Playwright suite

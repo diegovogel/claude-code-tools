@@ -216,8 +216,8 @@ project_pre_destroy() {
   refusal in `logs/vite.log` and no Vite at all, while `serve` still reports the
   env up because only the web URL is health-checked. Use
   `npx vite --port="$vite_port" --host 127.0.0.1` (as above). Hit converting
-  resume-creator on 2026-09-18: the fork's section used `npm run dev` and the
-  guard was added to `package.json` in the same conversion.
+  an app on 2026-09-18: its config used `npm run dev` and the guard was added
+  to `package.json` in the same conversion.
 - **Cached config shadows `.env`.** If `bootstrap/cache/config.php` exists (from
   `config:cache`), it overrides the env's `.env` ports/DB. `project_after_provision`
   runs `config:clear`. (A fresh worktree usually has no cached config, since
@@ -233,8 +233,8 @@ project_pre_destroy() {
   built-in limits (`upload_max_filesize=2M`), so uploads over 2 MB fail in the env
   but work on the Herd site, which looks like an app bug. `project_herd_php_ini`
   (above) exports the variable before `serve`; check with
-  `php -r 'echo ini_get("upload_max_filesize");'` from the same shell. Hit in
-  resume-creator on 2026-09-14.
+  `php -r 'echo ini_get("upload_max_filesize");'` from the same shell. Hit on
+  2026-09-14.
 - **`migrate --seed` is for a *fresh* per-env DB.** That's the case here (new
   schema / new sqlite file). Don't point an env at a shared/populated DB.
 - **A green in-env test run does not prove the per-env DB.** `phpunit.xml` usually
@@ -242,14 +242,15 @@ project_pre_destroy() {
   artisan test` never touches the MySQL schema the env was given. Prove the DB with a
   non-test command instead:
   `run <name> -- php artisan tinker --execute='echo DB::connection()->getDatabaseName();'`
-  must print `<base>_<env token>`. Seen while converting bluehorseentries on 2026-09-18.
+  must print `<base>_<env token>`. Seen while converting a MySQL app on 2026-09-18.
 - **SQLite path is pinned per env** (`DB_DATABASE=database/database.sqlite` in
   `project_env_port_lines`). Without it, the env's DB file follows the app's
   config: most apps use `database_path('database.sqlite')` (env-local, fine), but
-  some use `storage_path('database.sqlite')` (e.g. klog) and, worse, an absolute
+  some use `storage_path('database.sqlite')` and, worse, an absolute
   `DB_DATABASE` in the base `.env` would make every env AND main share one file.
-  Pinning a known relative path guarantees isolation regardless. Confirmed live:
-  klog's tables landed in the env's own `database/database.sqlite`, main untouched.
+  Pinning a known relative path guarantees isolation regardless. Confirmed live on
+  a `storage_path` app: its tables landed in the env's own
+  `database/database.sqlite`, main untouched.
 - **`.env` and `database/database.sqlite` are gitignored** (so they're never in a
   fresh worktree, which is why we create them) and the config file must stay
   gitignored or provision's managed block reads as a dirty worktree.
@@ -259,8 +260,8 @@ project_pre_destroy() {
   `mix-manifest.json`; running the watcher then shows those as modified, so a plain
   `destroy` refuses (uncommitted changes) and you need `destroy --force` (the dirt
   is build artifacts, not real work). Best fix: gitignore the build output.
-  Confirmed live, bluehorseentries (gitignored, stayed clean) vs hk-lpsignals
-  (tracked, went dirty).
+  Confirmed live: an app with the output gitignored stayed clean, one with it
+  tracked went dirty.
 - **Laravel's default `package.json` has no `name` field**, so npm names
   `package-lock.json` after the worktree directory; committing that from an env and
   merging it corrupts main's lockfile. Add an explicit `"name"` to `package.json`
@@ -276,20 +277,20 @@ project_pre_destroy() {
   query at boot; or, for apps that genuinely need existing data, seed the per-env DB
   from the main one in `project_after_provision` instead of migrating from scratch:
   `mysqldump -u root -h127.0.0.1 "$DB_BASENAME" | mysql -u root -h127.0.0.1 "${DB_BASENAME}_$(db_token "$name")"`
-  then optionally `php artisan migrate --force` to top up. Confirmed live with
-  hk-lpsignals (a `FiguresCalculate` command queries `tracks` in its constructor).
+  then optionally `php artisan migrate --force` to top up. Confirmed live with an
+  app whose console command queries a table in its constructor.
 
 ## Dogfooded (validation notes)
 
 Six repos exercised end to end (create / serve / stop / destroy), each left pristine:
-- **SQLite + Vite** (system-2-data-cruncher, PEC-report-data-extractor): green.
-- **SQLite + Vite, app points the DB at `storage_path`** (klog): green; motivated
+- **SQLite + Vite** (two apps): green.
+- **SQLite + Vite, app points the DB at `storage_path`**: green; motivated
   the per-env `DB_DATABASE` pin above (tables landed in the env's own file).
-- **MySQL + Redis + Mix** (bluehorseentries): green; per-env schema created + dropped.
-- **MySQL + Mix + Inertia, sync queue** (carriage-house-printery): green; sync queue
-  correctly starts no worker; created from its feature branch (pass the base ref).
-- **MySQL + Mix that commits its built assets** (hk-lpsignals): the watcher dirties
-  tracked files, so `destroy --force`; also surfaced the DB-at-boot caveat above.
+- **MySQL + Redis + Mix**: green; per-env schema created + dropped.
+- **MySQL + Mix + Inertia, sync queue**: green; sync queue correctly starts no
+  worker; created from its feature branch (pass the base ref).
+- **MySQL + Mix that commits its built assets**: the watcher dirties tracked
+  files, so `destroy --force`; also surfaced the DB-at-boot caveat above.
 
-Not yet run: **mbrp-main-app** (no `.env`/vendor/node_modules, no front end) would
+Not yet run: an app with no `.env`/vendor/node_modules and no front end would
 exercise the cold-start path (`composer install` + `.env.example` + `key:generate`).

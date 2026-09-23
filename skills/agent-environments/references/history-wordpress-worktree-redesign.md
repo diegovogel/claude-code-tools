@@ -8,7 +8,7 @@ part of this record.
 
 ## 1. What happened
 
-A week-long session on the tab-handbook site (theme + plugin in one WordPress
+A week-long session on a WordPress site (theme + plugin in one WordPress
 install) could not tear down its own agent env: every `cd <main checkout>` and
 `git -C <main checkout>` was refused, and `agent-env-wp.sh list` from inside the
 env said the env did not exist. The diagnosis recorded at the time: the runtime

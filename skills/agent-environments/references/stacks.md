@@ -169,8 +169,8 @@ subshell so each `&` job gets its own process group and stop kills whole trees.
 before declaring the env up. The poll is a bare `curl -k -s` (no `-f`): any
 HTTP answer counts as up, a 401 from an auth-gated route or a 404 included, and
 only a refused connection, a TLS failure or a 2-second timeout keeps polling.
-So a protected endpoint is a fine health URL (email-archiver polls
-`/api/auth/validate`, which answers 401 without a token), and a self-signed
+So a protected endpoint is a fine health URL (an API route that answers 401
+without a token works), and a self-signed
 dev cert needs nothing extra. On any failure it tears the half-started stack
 back down so the next `serve` doesn't see stale PID files.
 
@@ -351,7 +351,7 @@ A Composer script array (`composer dev`) wires it as its own element ahead of
 the real command, `"./scripts/agent-env.sh guard"`; Composer stops the array
 when that element exits 1 and reports "Script ./scripts/agent-env.sh guard
 handling the dev event returned with error code 1", which is the tell-tale that
-the shim, not an old Node guard, refused. Confirmed live in walkingman.
+the shim, not an old Node guard, refused. Confirmed live in a Laravel app.
 
 ## OS / copy-on-write notes
 
@@ -416,4 +416,4 @@ the shim, not an old Node guard, refused. Confirmed live in walkingman.
   "../../../.eslintrc"` while the same command passes at main. Fix once, in the
   project: add `"root": true` to the repo's `.eslintrc` (backward compatible when
   no config lives above the repo, the normal case). ESLint 9's flat config has no
-  cascade, so it is unaffected. Seen live: ttp-website (`next lint`, ESLint 7).
+  cascade, so it is unaffected. Seen live in a Next.js app (`next lint`, ESLint 7).
