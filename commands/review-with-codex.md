@@ -1,4 +1,4 @@
-Run the current branch through automated Codex review cycles until it's clean or cycles are exhausted. Unlike `/pr-with-codex`, this does not create or post to a PR — it drives local Codex reviews against the branch diff.
+Run the current branch through automated Codex review cycles until Codex has nothing real left to raise or cycles run out. Unlike `/pr-with-codex`, this does not create or post to a PR; it drives local Codex reviews against the branch diff.
 
 ## Phase 1: Preconditions
 
@@ -38,7 +38,7 @@ node /Users/diego/.claude/plugins/cache/openai-codex/codex/<version>/scripts/cod
 
 Two calls rather than one `node "$(ls -t ...)"`, because the pre-PR workflow runs this from inside a worktree the session entered with `EnterWorktree`, and the runtime's Bash vetting there refuses command substitution outright. Sessions were quietly typing the path by hand to get past it; a plain pipe and a literal path both pass.
 
-**Effort and model.** Every cycle runs at the `model_reasoning_effort` that `~/.codex/config.toml` sets (medium), on the catalog's default model, which stays unpinned so reviews follow the newest one. Don't pass `--model`, and don't change the effort between cycles. (A high-effort final pass on another model was tried and dropped as too fragile.)
+**Effort and model.** Every cycle runs on what `~/.codex/config.toml` pins: Sol (`gpt-5.6-sol`) at high effort. Don't pass `--model`, and don't change the effort between cycles. Replays of past branches at the exact commits reviewed showed why: Astra at medium caught half of what Sol/high's first pass found and Terra at high a third, and both came back clean on branches with real bugs. A per-cycle effort switch was tried and dropped as too fragile.
 
 **Always pass `--scope branch --base main` explicitly.** Without those flags the reviewer defaults to `--scope auto`, which picks up the working-tree diff first and will review only your uncommitted changes (typically unrelated ambient-tool churn) instead of the branch commits we came here to review. This produces a confident "no findings" on the wrong diff and has bitten this skill multiple times. If the branch is based on something other than `main`, substitute the right base — but set it explicitly, don't trust the default.
 
@@ -70,14 +70,29 @@ Parse the findings as follows:
 
 ### Addressing feedback
 
-For each finding:
+Sort every finding into one of three kinds. After quoting Codex, give each finding a line in the chat saying which kind it is and what you'll do with it.
 
-- **Fix it** unless you have a good reason not to, such as:
-  - Context Codex lacks (project convention, architectural decision, data Codex can't see)
-  - A deliberate trade-off already discussed with the user
-  - The suggestion is wrong or introduces its own problems
+- **Real**: a realistic trigger (normal use, a routine operation, or a failure that will eventually happen, such as an API error, a retry, odd but plausible input, or attacker input on a public surface) *and* real impact (wrong or broken behavior that users, editors or operators would notice, lost or corrupted data, a broken deploy or CI run). A comment or doc that states something false counts too: it misleads the next reader, and correcting it can't introduce a bug.
+- **Nit**: true, but the impact is minor (cosmetic, style, log noise, a small inefficiency, wording).
+- **Edge case**: true, but the trigger needs a setup the project doesn't have (an install layout, PHP extension or plugin it doesn't use), deliberate misuse by a trusted user, implausible timing, or content that doesn't exist.
+
+**Critical work is always real.** A finding that touches money (prices, totals, charges, payment feeds, refunds), security boundaries (authentication, sessions, permission checks, secrets, trust decisions), personal data, or irreversible operations (permanent deletes, migrations or backfills that rewrite records, bulk sends) is real however unlikely its trigger looks. Leave one unfixed only if it's wrong or moot, and show the evidence: a reproduction, a measurement, or context Codex can't see.
+
+When a finding's reality hinges on data or runtime behavior, measure it instead of arguing it: count instances in the real content, or reproduce the behavior.
+
+Then decide the cycle:
+
+1. **Any real findings?** Fix them and go to the next cycle. Nits and edge cases in the same cycle are noted, not fixed.
+2. **Only new nits or edge cases?** Fix nothing and go to the next cycle anyway. The code is unchanged, but each Codex pass samples differently, and later passes do find real issues that earlier ones missed.
+3. **Only repeats, or repeats mixed with nits and edge cases?** Stop and go to **Phase 3**. A repeat is substantively the same finding as one from an earlier cycle (same root cause, same recommendation, even if rephrased or re-prioritized P1↔P2), whether you fixed it, rejected it or noted it. If it repeats a real finding you fixed, check whether the fix was incomplete before counting it as a repeat.
+
+Why the bar: in an audit of 162 findings from high-effort reviews, two thirds were nits, edge cases or wrong, and more than 40% of the findings after cycle 1 sat in code written to fix an earlier finding. Leaving marginal findings unfixed removes that churn, and continuing past them keeps the later passes that still find real issues.
+
+For each real finding:
+
+- **Fix it** unless it's a trade-off you've already settled with the user, or it turns out wrong or moot. Then say which, with the evidence.
 - **Verify tool-behavior claims before implementing.** When a finding's correctness depends on how an external tool behaves at runtime (cURL flag semantics, ffmpeg parsing, DB engine quirks), reproduce that behavior locally before coding the fix. The companion log shows `Command completed... (exit 0)` for tool calls Codex made during review — but `exit 0` only means the shell wrapper ran; the underlying tool may have errored on stderr. Don't take Codex's tool-call exploration as proof. A unit test that just asserts the format of your fix won't catch a tool-level rejection — the regression test has to exercise the real tool path, or you verify manually and note that in the commit message.
-- **When skipping**: briefly note why in the commit message or the response summary. Unlike `/pr-with-codex`, there's no PR comment thread — the human record lives in your commit messages and the conversation.
+- **Note what you don't fix.** Nits, edge cases and declined findings go in your final report (see Phase 3), each with its kind and a one-line reason. There's no commit to record them in, and unlike `/pr-with-codex` there's no PR comment thread.
 - **Write a regression test** for every accepted finding, as part of the same commit, subject to two conditions:
   1. The codebase already has a test system (runner + existing tests). Don't stand one up just for this.
   2. A test is feasible and worthwhile — a judgment call. The test should encode the specific failure mode Codex described: a behavior that would have shipped broken if the finding had landed. Follow the codebase's existing test conventions (same framework, fixtures, file layout). You should have enough confidence in the test that you believe it would have failed pre-fix; if in doubt, revert the fix locally, re-run, and check.
@@ -93,35 +108,30 @@ For each finding:
 
   **Why this matters:** drift between iterated fixes is the dominant failure mode in this skill. Cycle N's fix can miss a call site or collide with cycle N-K's behavior; a regression test at each cycle locks the intent in place so a later cycle's code change can't silently re-introduce the bug.
 
-After fixing, commit the changes (one commit per cycle is fine; title it with the cycle number, e.g. "Address Codex cycle 2: ...") and push. Do not amend or force-push.
+After fixing, commit the changes (one commit per cycle is fine; title it with the cycle number, e.g. "Address Codex cycle 2: ...") and push. Do not amend or force-push. A cycle that fixed nothing has nothing to commit.
 
 Then return to Step 1 for the next cycle.
 
-### Early exit on repeat findings
-
-If Codex re-raises substantively the same finding you already pushed back on in a previous cycle (same root cause, same recommendation, even if rephrased or re-prioritized P1↔P2), that's the same signal the cycle-7 evaluation below is checking for. Stop the loop, summarize what's repeating and what you've rejected, and ask the user whether to continue or wrap up. Don't keep cycling mechanically just because you haven't hit the cap — the loop's value is finding *new* issues, and a Codex that's stuck on a rejected point won't get unstuck by another cycle.
-
-This applies once you've made the same push-back twice. A finding that was raised, rejected, raised again, and rejected again — that's the pattern to stop on. New findings in the same cycle are still addressed normally; only the loop itself is what stops.
-
 ## Cycle limit
 
-**Max 7 cycles.** If cycle 7 ends with findings still present:
+**Max 7 cycles.** If cycle 7 fixed real findings, those fixes haven't been reviewed:
 
-- Address them (same as any other cycle), then evaluate:
-  - Are the remaining / newest findings meaningful and actionable?
-  - Or is Codex cycling on the same low-value suggestions you've already pushed back on?
 - Report to the user with a clear recommendation: **"continue (and why)"** or **"stop (and why)"**. Do NOT automatically start cycle 8 without the user's approval.
-- **Do NOT proceed to Phase 3** after cycle 7 unless the user approves. The PR step assumes a clean review.
+- **Do NOT proceed to Phase 3** unless the user approves.
+
+If cycle 7 found only nits, edge cases or repeats, the loop is done: go to Phase 3.
 
 ## Phase 3: Create PR
 
-Triggered only when a cycle returns no findings within the cap. Do NOT run this phase if cycles hit the cap with findings still present.
+Triggered when the loop ends on its own: a clean cycle, a stop on repeats, or a final cycle with nothing real. Do NOT run this phase right after cycle 7 fixed real findings unless the user approves.
+
+In your report, list every finding you noted but didn't fix, most severe first, each with its kind and a one-line reason, so the user can overrule any of them before merging.
 
 Follow your standard PR-creation workflow from your system prompt's "Creating pull requests" section. Do NOT duplicate those instructions here — use the built-in workflow verbatim (status/diff/log in parallel, draft title + body, push the branch if needed, run `gh pr create` with a HEREDOC body, return the PR URL).
 
-Rationale: if Codex signs off, the branch is ready for review. Automating the PR step saves a manual beat and keeps the workflow symmetric with `/pr-with-codex` (which creates the PR first, then reviews; this skill reviews first, then creates the PR).
+Rationale: once Codex has nothing real left to raise, the branch is ready for review. Automating the PR step saves a manual beat and keeps the workflow symmetric with `/pr-with-codex` (which creates the PR first, then reviews; this skill reviews first, then creates the PR).
 
-If anything in Phase 3 fails — push rejected, `gh pr create` errors out, branch already has an open PR, etc. — report the error to the user. The Codex-clean result still stands.
+If anything in Phase 3 fails (push rejected, `gh pr create` errors out, branch already has an open PR, etc.), report the error to the user. The review result still stands.
 
 ## Why this skill exists
 
