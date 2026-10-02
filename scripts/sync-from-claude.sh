@@ -33,6 +33,7 @@ PATHS=(
   commands/start-todoist-task.md
 
   # Scripts
+  scripts/environment-wrapup
   scripts/pr-with-codex
 
   # Skills

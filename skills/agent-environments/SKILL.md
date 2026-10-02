@@ -346,7 +346,9 @@ step 7 still carries the full record.
    re-run more rather than less.
 7. **STOP at the PR boundary.** The work should already be committed and pushed
    by this point (see the pre-authorization above). The one action to hold back
-   is `gh pr create`, which needs the user's express go-ahead.
+   is `gh pr create`, which needs the user's express go-ahead. That usually
+   comes as `/environment-wrapup`, which opens the PR, merges it once CI is
+   green, and tears the env down.
    The turn's final message must contain a **workflow report**:
    steps 2–6 listed by name, in order, each with a one-or-two-line summary of
    what it found and what changed, or "skipped" plus the reason. All five

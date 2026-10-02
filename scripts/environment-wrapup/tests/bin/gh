@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+#
+# Fake gh for the environment-wrapup tests. Logs every call to $GH_STATE/calls and
+# answers from canned files in $GH_STATE, applying --jq with the real jq the way gh
+# does. Knobs (all optional files in $GH_STATE):
+#   view.N.json          the Nth `pr view` (the highest N <= the call count wins)
+#   view.merged.json     every `pr view` once a merge went through
+#   merged-delay         number of further views that still show the PR open after a merge
+#   view-fail.N          the Nth `pr view` fails
+#   merge-rc[.N]         exit code of the Nth (or every) `pr merge`
+#   merge-merges-anyway[.N]  a failing (Nth) `pr merge` still merges (a network error after the fact)
+#   runs.N.json          the Nth actions/runs answer; runs-error makes them all a 403 body,
+#                        runs-fail.N makes the Nth a 502 body
+#   repo-fail.N          the Nth `api repos/o/r` (merge settings) fails
+#   update-fail.N        the Nth update-branch fails
+#   contents-rc          exit code of a workflow file read
+#   merged-history.json, merged-history-rc, merged-last.json, merged-prs.json,
+#   dependents.json, open-prs.json, workflows.json, contents.json, commit.json, repo.json
+#   delete-rc            exit code of the branch DELETE
+#   ref-state            "gone" (404, the default), "present", or "error" (a 502)
+set -euo pipefail
+S="$GH_STATE"
+echo "$*" >>"$S/calls"
+
+args=("$@")
+jq_expr=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+  [[ "${args[$i]}" == --jq ]] && jq_expr="${args[$((i + 1))]}"
+done
+has() { local a; for a in "${args[@]}"; do [[ "$a" == "$1" ]] && return 0; done; return 1; }
+canned() { if [[ -f "$S/$1" ]]; then cat "$S/$1"; else printf '%s\n' "$2"; fi; }
+emit() { if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr"; else cat; fi; }
+next() { local n; n=$(($(cat "$S/$1" 2>/dev/null || echo 0) + 1)); echo "$n" >"$S/$1"; echo "$n"; }
+latest() { # prefix count -> the highest-numbered canned file at or below count
+  local k
+  for ((k = $2; k >= 1; k--)); do [[ -f "$S/$1.$k.json" ]] && { echo "$1.$k.json"; return 0; }; done
+  return 0
+}
+
+case "$1 ${2:-}" in
+  "pr view")
+    n=$(next view-count)
+    [[ ! -f "$S/view-fail.$n" ]] || { echo "error connecting to api.github.com" >&2; exit 1; }
+    delay=$(cat "$S/merged-delay" 2>/dev/null || echo 0)
+    if [[ -f "$S/merged" ]] && ((delay == 0)); then
+      file="view.merged.json"
+    else
+      [[ ! -f "$S/merged" ]] || echo $((delay - 1)) >"$S/merged-delay"
+      file=$(latest view "$n")
+    fi
+    [[ -n "$file" ]] || { echo "no canned view" >&2; exit 1; }
+    emit <"$S/$file"
+    ;;
+  "pr merge")
+    n=$(next merge-count)
+    code=0
+    if [[ -f "$S/merge-rc.$n" ]]; then code=$(cat "$S/merge-rc.$n"); elif [[ -f "$S/merge-rc" ]]; then code=$(cat "$S/merge-rc"); fi
+    if ((code == 0)) || [[ -f "$S/merge-merges-anyway" || -f "$S/merge-merges-anyway.$n" ]]; then touch "$S/merged"; fi
+    ((code == 0)) || echo "GraphQL: Base branch was modified. Review and try the merge again." >&2
+    exit "$code"
+    ;;
+  "pr list")
+    if has --head && has merged; then canned merged-prs.json '[]' | emit
+    elif has merged && has mergeCommit; then canned merged-last.json '[]' | emit
+    elif has merged; then
+      code=$(cat "$S/merged-history-rc" 2>/dev/null || echo 0)
+      ((code == 0)) || { echo "HTTP 502" >&2; exit "$code"; }
+      canned merged-history.json '[]' | emit
+    elif has --base; then canned dependents.json '[]' | emit
+    else canned open-prs.json '[]' | emit
+    fi
+    ;;
+  "repo view")
+    if has defaultBranchRef; then echo '{"defaultBranchRef":{"name":"main"}}' | emit
+    else canned slug.json '{"nameWithOwner":"o/r"}' | emit
+    fi
+    ;;
+  api*)
+    method=GET path=""
+    for ((i = 1; i < ${#args[@]}; i++)); do
+      case "${args[$i]}" in
+        -X) method="${args[$((i + 1))]}"; i=$((i + 1)) ;;
+        --jq | -f | -H) i=$((i + 1)) ;;
+        -*) ;;
+        *) [[ -z "$path" ]] && path="${args[$i]}" ;;
+      esac
+    done
+    case "$method $path" in
+      "PUT "*/update-branch)
+        n=$(next update-count)
+        [[ ! -f "$S/update-fail.$n" ]] || { echo '{"message":"Server Error"}'; exit 1; }
+        touch "$S/updated"; echo '{}' ;;
+      "DELETE "*/git/refs/heads/*) exit "$(cat "$S/delete-rc" 2>/dev/null || echo 0)" ;;
+      "GET "*/git/ref/heads/*)
+        case "$(cat "$S/ref-state" 2>/dev/null || echo gone)" in
+          present) echo '{"ref":"x"}' ;;
+          error) echo '{"message":"Server Error"}'; echo "gh: Server Error (HTTP 502)" >&2; exit 1 ;;
+          *) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+        esac
+        ;;
+      "GET "*/actions/runs*)
+        n=$(next runs-count)
+        if [[ -f "$S/runs-fail.$n" ]]; then
+          echo '{"message":"Server Error","status":"502"}'
+          exit 1
+        fi
+        if [[ -f "$S/runs-error" ]]; then
+          # gh prints an error's JSON body on stdout and skips --jq.
+          echo '{"message":"Resource not accessible by integration","status":"403"}'
+          exit 1
+        fi
+        file=$(latest runs "$n")
+        if [[ -n "$file" ]]; then emit <"$S/$file"; else echo '{"workflow_runs":[]}' | emit; fi
+        ;;
+      "GET "*/actions/workflows*) canned workflows.json '{"workflows":[]}' | emit ;;
+      "GET "*/contents/*)
+        code=$(cat "$S/contents-rc" 2>/dev/null || echo 0)
+        ((code == 0)) || { echo '{"message":"Server Error"}'; exit "$code"; }
+        canned contents.json '{"content":""}' | emit ;;
+      "GET "*/commits/*) canned commit.json '{"parents":[{},{}]}' | emit ;;
+      "GET repos/"*)
+        n=$(next repo-count)
+        [[ ! -f "$S/repo-fail.$n" ]] || { echo '{"message":"Server Error"}'; exit 1; }
+        canned repo.json '{"allow_merge_commit":true,"allow_squash_merge":false,"allow_rebase_merge":false}' | emit ;;
+      *) echo "fake gh: unhandled api call: $*" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "fake gh: unhandled: $*" >&2; exit 1 ;;
+esac
