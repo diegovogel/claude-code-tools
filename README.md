@@ -18,7 +18,8 @@ Some tools require additional dependencies as noted in their details below.
 * [start-todoist-task](#command-start-todoist-task): fetches task details, creates a plan, and has Codex review the plan before I see it.
 * [manual-qa](#command-manual-qa): creates a comprehensive manual QA procedure and walks through it with me.
 * [review-with-codex](#command-review-with-codex): Claude goes through several rounds of review with Codex.
-* [environment-wrapup](#command-environment-wrapup): takes an agent environment from finished work to merged: opens the PR, merges it once CI is green, and tears the environment down.
+* [land](#command-land): takes an agent environment from finished work to merged: opens the PR, merges it once CI is green, then runs `/environment-wrapup`.
+* [environment-wrapup](#command-environment-wrapup): tears down an agent environment whose work is merged.
 * [session-wrapup](#command-session-wrapup): finds valuable information in a session and saves it for future reference by Claude.
 
 ### Skills
@@ -90,20 +91,36 @@ The GitHub bot version is still in this repo: [pr-with-codex](commands/pr-with-c
 * Codex plugin for Claude.
 * A ChatGPT account and subscription, depending on usage.
 
-### Command: `environment-wrapup`
+### Command: `land`
 
-[View source](commands/environment-wrapup.md)
+[View source](commands/land.md)
 
 **Why it exists:** once the work in an agent environment is ready, I almost always do the same thing: ask Claude to open the PR, then ask it to merge the PR when CI is green, delete the remote branch, and clean up the environment. This command does all of that in one go. GitHub's auto-merge isn't an option everywhere: some repos can't turn it on, and on a repo with no required checks it merges before CI has even run.
 
-**What it does:** checks what the environment still needs, opens the PR with Claude Code's built-in PR workflow (or reuses one that's already open), waits for CI and merges, deletes the remote branch, tears the environment down, updates the main checkout, and runs `/session-wrapup`.
+**What it does:** checks what the environment still needs, opens the PR with Claude Code's built-in PR workflow (or reuses one that's already open), waits for CI and merges, deletes the remote branch, then runs [`/environment-wrapup`](#command-environment-wrapup) to tear the environment down.
 
 **Highlights:**
-* The status checks, the CI wait and merge, and the teardown are bash scripts ([scripts/environment-wrapup](scripts/environment-wrapup)), with their own tests. They're fast and do the same thing every time, and Claude only steps in where judgment is needed: writing the PR, or fixing a failing check.
+* The status checks and the CI wait and merge are bash scripts ([scripts/environment-wrapup](scripts/environment-wrapup)), with their own tests. They're fast and do the same thing every time, and Claude only steps in where judgment is needed: writing the PR, or fixing a failing check.
 * Waits for every check on the PR's head commit, including GitHub Actions jobs that haven't started yet, and merges exactly the commit that passed. If the repo has no CI, it merges right away. If the repo normally runs CI and none starts, it asks instead of merging.
 * Merges the way the repo usually does (merge commit, squash or rebase), and keeps the remote branch when deleting it would be unsafe (a fork, or another PR based on it).
 * Opens each PR into the branch its environment started from (a WordPress environment often starts from a long-lived feature branch), and stops to ask when that starting point isn't on GitHub yet, instead of slipping unpushed work into the PR.
 * Handles every PR one environment needs: a WordPress environment spanning a theme and a plugin gets one PR per repo.
+
+**Dependencies:**
+* The [environment-wrapup](#command-environment-wrapup) command.
+* GitHub CLI (`gh`), `jq`, and git 2.38 or newer.
+
+### Command: `environment-wrapup`
+
+[View source](commands/environment-wrapup.md)
+
+**Why it exists:** removing an agent environment safely takes several steps (stop its servers, remove the worktree, free its port, delete the branch, update the main checkout), and it's the same every time. `/land` runs it at the end, and I run it on its own when a PR merged some other way.
+
+**What it does:** confirms the environment's work is merged, deletes a merged PR's leftover remote branch, tears the environment down, updates the main checkout, and runs `/session-wrapup`.
+
+**Highlights:**
+* The status check and the teardown are bash scripts ([scripts/environment-wrapup](scripts/environment-wrapup)), shared with `/land` and covered by the same tests.
+* Stops instead of tearing down when the work isn't merged yet, and points to `/land`.
 * Squash and rebase merges rewrite commits, which makes a merged branch look unmerged to the teardown's safety guard. The script checks that the base branch has everything on the branch before forcing the teardown, and refuses otherwise.
 * Never checks out a branch in the main checkout or commits to whatever is checked out there, so it's safe to run while I'm working there on another branch.
 
@@ -211,7 +228,7 @@ My typical workflow for web/software dev:
    `/security-review-plus`.
 6. Run `/review-with-codex`.
 7. More manual QA if major changes were made during review with Codex.
-8. Run `/environment-wrapup` (or, outside an agent environment, merge the PR and run `/session-wrapup`).
+8. Run `/land` (or, outside an agent environment, merge the PR and run `/session-wrapup`).
 
 ## License
 

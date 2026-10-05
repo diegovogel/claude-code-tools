@@ -29,6 +29,7 @@ PATHS=(
   commands/pr-with-codex.md
   commands/review-with-codex.md
   commands/environment-wrapup.md
+  commands/land.md
   commands/session-wrapup.md
   commands/start-todoist-task.md
 
