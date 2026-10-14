@@ -215,9 +215,11 @@ runtime's worktree isolation (SKILL.md, "What `EnterWorktree` switches on"):
 - Refused while bound: any `git -C` at the main checkout, command
   substitution, `$VAR` inside a chained command, heredocs with braces (a PHP
   file with closures, even into the worktree's own files), a heredoc chained
-  with more commands, and git chained with anything but its own
-  `add && commit`. Write/Edit bypass the vetting, so write PHP with them, and
-  run git one step per call.
+  with more commands, git chained with anything but its own `add && commit`,
+  and `wp eval '<php>'` (the vetting cannot read a string it evaluates).
+  Write/Edit bypass the vetting, so write PHP with them (a QA snippet goes in
+  the scratchpad and runs as `wp --path=<install> eval-file <file>`), and run
+  git one step per call.
 - The sibling worktree (the plugin beside a theme env, or the reverse) is
   fully usable by absolute path and `git -C <env sibling>`; it cannot become
   the session's cwd (adoption is limited to the launch repo's worktrees), so
