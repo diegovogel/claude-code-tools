@@ -64,7 +64,7 @@ Read the output file path from the notification (or use the Skill tool's direct 
 
 Parse the findings as follows:
 
-- **No findings**: if the review text indicates no concerns ("no issues", "looks good", "no findings", or similar), the branch is clean. Say so and proceed to **Phase 3: Create PR** below.
+- **No findings**: if the review text indicates no concerns ("no issues", "looks good", "no findings", or similar), the branch is clean. Say so and proceed to **Phase 3: Report** below.
 - **One or more findings**: each finding typically includes a severity tag (P1/P2), a file:line reference, a description, and a recommendation. Quote the findings verbatim, then proceed to "Addressing feedback" below.
 - **Unparseable or ambiguous output**: if the review text doesn't clearly convey findings or no-findings, show the raw output to the user and ask how to proceed.
 
@@ -84,7 +84,7 @@ Then decide the cycle:
 
 1. **Any real findings?** Fix them and go to the next cycle. Nits and edge cases in the same cycle are noted, not fixed.
 2. **Only new nits or edge cases?** Fix nothing and go to the next cycle anyway. The code is unchanged, but each Codex pass samples differently, and later passes do find real issues that earlier ones missed.
-3. **Only repeats, or repeats mixed with nits and edge cases?** Stop and go to **Phase 3**. A repeat is substantively the same finding as one from an earlier cycle (same root cause, same recommendation, even if rephrased or re-prioritized P1↔P2), whether you fixed it, rejected it or noted it. If it repeats a real finding you fixed, check whether the fix was incomplete before counting it as a repeat.
+3. **Only repeats, or repeats mixed with nits and edge cases?** End the loop and go to **Phase 3**. A repeat is substantively the same finding as one from an earlier cycle (same root cause, same recommendation, even if rephrased or re-prioritized P1↔P2), whether you fixed it, rejected it or noted it. If it repeats a real finding you fixed, check whether the fix was incomplete before counting it as a repeat.
 
 Why the bar: in an audit of 162 findings from high-effort reviews, two thirds were nits, edge cases or wrong, and more than 40% of the findings after cycle 1 sat in code written to fix an earlier finding. Leaving marginal findings unfixed removes that churn, and continuing past them keeps the later passes that still find real issues.
 
@@ -121,17 +121,11 @@ Then return to Step 1 for the next cycle.
 
 If cycle 7 found only nits, edge cases or repeats, the loop is done: go to Phase 3.
 
-## Phase 3: Create PR
+## Phase 3: Report
 
-Triggered when the loop ends on its own: a clean cycle, a stop on repeats, or a final cycle with nothing real. Do NOT run this phase right after cycle 7 fixed real findings unless the user approves.
+Triggered when the loop ends on its own: a clean cycle, an end on repeats, or a final cycle with nothing real. Do NOT run this phase right after cycle 7 fixed real findings unless the user approves.
 
-In your report, list every finding you noted but didn't fix, most severe first, each with its kind and a one-line reason, so the user can overrule any of them before merging.
-
-Follow your standard PR-creation workflow from your system prompt's "Creating pull requests" section. Do NOT duplicate those instructions here — use the built-in workflow verbatim (status/diff/log in parallel, draft title + body, push the branch if needed, run `gh pr create` with a HEREDOC body, return the PR URL).
-
-Rationale: once Codex has nothing real left to raise, the branch is ready for review. Automating the PR step saves a manual beat and keeps the workflow symmetric with `/pr-with-codex` (which creates the PR first, then reviews; this skill reviews first, then creates the PR).
-
-If anything in Phase 3 fails (push rejected, `gh pr create` errors out, branch already has an open PR, etc.), report the error to the user. The review result still stands.
+The report is this command's output: how many cycles ran, what each fixed, and every finding you noted but didn't fix, most severe first, each with its kind and a one-line reason, so the user can overrule any of them before merging. Opening the PR is not part of this command; that is `/land` or the user's call.
 
 ## Why this skill exists
 

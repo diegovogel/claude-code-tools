@@ -81,7 +81,7 @@ Reporting rules for Phase 3:
 
 ## Step 6: Combined report
 
-Output a single markdown report. No preamble, no trailing summary, just the findings.
+The review's output is a single markdown report: no preamble, no trailing summary, just the findings.
 
 Structure:
 
@@ -124,5 +124,3 @@ Summary: N of M checks passed.
 
 One sentence per tip entry that you checked but did not flag, in the form: `- <tip title>: not applicable / no match in diff`. This is the audit trail proving every entry was actually checked, do not skip it.
 ```
-
-Final reply: the markdown report and nothing else.

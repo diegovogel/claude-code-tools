@@ -109,7 +109,7 @@ If you cannot verify something without instrumentation (e.g., a stub that's invo
 
 Mark every instrumentation site with a comment like `# TEMPORARY (manual-qa - remove in Phase 5)` so Phase 5 can find them by grep.
 
-### Print the procedure and stop
+### Print the procedure
 
 Once you've drafted Setup + all Steps + Cleanup checklist, print it to the user in full. Don't start Phase 2 until they confirm. They usually signal go by saying "go", "looks good", or just driving Step 1, but if they push back on any Step, revise before starting.
 
