@@ -88,6 +88,13 @@ Each Step's printed body has three labeled parts:
 - **Expected (interface)**: what the driver observes at the surface: screen state (alert text, a modal opening, a chart point appearing), HTTP status and response shape, exit code plus stdout/stderr. For a break-it Step this states the *desired* behavior (a clear validation message, a 422 with a reason, exit 1 with a helpful line), not a prediction of what the code will do.
 - **My checks**: the backend signals you'll verify: DB rowcount delta, log line, network request, file existence, queued job. For a break-it Step this always includes "no unintended state change": a rejected input wrote nothing, an interrupted flow left no orphan rows.
 
+### Checks on a Laravel Herd app
+
+When the app runs on Laravel Herd 2.0 (Pro), the `herd` CLI gives two more **My checks**:
+
+- **Mail**: start `herd mail:wait --to=<an address unique to this Step> --timeout=60` in the background before the action that sends, then `herd mail:links <id>` to follow the verify or reset link. Only "No matching mail arrived within N seconds" after the full timeout means nothing was sent; an immediate exit 1 means Herd or its mail server is down. Mail reaches Herd only from an app whose effective mailer is SMTP to Herd (`php artisan config:show mail.default` prints `smtp`; `herd mail:config` prints the `.env` values). An env or checkout with `MAIL_MAILER=log` writes mail to its log, so check the log there, and give a "no mail sent" Step a positive control first. The inbox is shared by every site and env: always filter by the unique `--to`, and never run `herd mail:clear` without a mailbox.
+- **Queries and errors**: after the happy paths, `herd insights:analyze` lists N+1, duplicate and slow queries and errors with file:line. It lists only requests with issues, so an empty answer proves nothing by itself. To confirm a fix, note the cursor it printed, re-run the Step's action, then run `herd insights:analyze --after=<cursor> --all-requests`: the request must appear with the finding gone. It only sees requests Herd itself serves (a `.test` site), never `php artisan serve`, so it has nothing on an agent env's server; skip it there. On a Herd workspace, run it from the workspace directory or pass that directory as `--site`, because `--site=<workspace host>` finds nothing.
+
 ### Step ordering principles
 
 - Simplest happy path first, so the user gets confidence the wiring is right before variants and edge cases.

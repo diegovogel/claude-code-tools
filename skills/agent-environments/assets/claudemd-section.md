@@ -35,7 +35,12 @@ queue worker." >
   env takes the lowest free slot; `destroy` frees it for reuse.
 - **Inside an env, NEVER run `<MAIN_DEV_CMD, e.g. npm run dev>`**: it is pinned
   to the main checkout's ports and collides. This is enforced by
-  `./scripts/agent-env.sh guard`, the first step of the dev command. Use
+  `./scripts/agent-env.sh guard`, the first step of the dev command. <Laravel
+  13.16+ only: "A direct `php artisan dev` gets past it: only its Vite child
+  (`npm run dev`) is refused, so you still see the guard's message, while
+  `artisan serve`, `queue:listen` and pail keep running. For it this rule is the
+  only protection; if you started it, stop the whole process." Delete
+  otherwise. > Use
   `./scripts/agent-env.sh serve <name>`
   (background, PID-managed, health-checked; logs in the env's `logs/`). Most
   tasks need only `<TEST_CMD>` and `<BUILD_CMD>`; only `serve` when you need a
@@ -91,6 +96,13 @@ queue worker." >
   branches, stash, `git clean`, or take the main ports (takeover QA) in that
   checkout without asking first; `git stash` in particular is one shared list
   across all worktrees.
+- <Herd sites only (the main checkout is served by Laravel Herd 2.0+): "**Never
+  open an env's Herd URL (`worktree-<name>.<site>.test`), and never run
+  `herd workspace*` on an env from anywhere** (inside it, or by name or path from
+  the main checkout): opening it in a browser or Playwright adopts the env as a
+  Herd workspace and edits its `.env`, and Herd's own delete skips the teardown
+  guards. Test an env on its own ports. If one was adopted anyway, `list` flags
+  it and `destroy` is the only way to unlink it." Delete otherwise. >
 - **Never run `git clean -fdx` at the main checkout root**: envs are nested and
   gitignored, so `-x` would delete them all.
 - **Branch naming is automatic** (`<worktree>-<name>`); don't hand-rename env

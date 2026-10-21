@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Round-trips the generic engine through a rendered shim against a synthetic git
 # repo and a synthetic config dir (AGENT_ENV_CONFIG_DIR), and checks the shim's
-# local `guard` for both flows plus the WordPress engine's config loading (no
-# WordPress round-trip: that needs an install and a database). Self-contained:
+# local `guard` for both flows, the Herd-adoption cleanup in list and destroy
+# (against a fake Herd registry and a stub herd), plus the WordPress engine's
+# config loading (no WordPress round-trip: that needs an install and a
+# database). Self-contained:
 # builds and removes its own temp dirs, starts no servers (the minimal config's
 # project_start_servers is a no-op, its health list is empty, and PORT_BASE sits
 # in a high band nothing uses). Run with `bash tests/engine-config-test.sh`; it
@@ -30,6 +32,38 @@ unset AGENT_ENV_PROJECT AGENT_ENV_SHIM AGENT_ENV_ENGINE
 # A rendered shim execs $AGENT_ENV_ENGINE, else whatever engine is installed
 # under $HOME; point it at the sibling so every case exercises the engine here.
 export AGENT_ENV_ENGINE="$engine"
+# Herd's registry and CLI: a synthetic valet dir and a stub that logs each call
+# (cwd|args) and behaves like Herd: workspace:delete drops the site's record and
+# link, `workspaces` prunes records whose path is gone. $root/herd-mode switches
+# it: "noop" exits 0 doing nothing (Herd's wrapper when it can't find its php),
+# "fail-delete" fails only workspace:delete. No case touches the real Herd.
+export AGENT_ENV_HERD_VALET="$root/herd-valet" AGENT_ENV_HERD_BIN="$root/fake-herd"
+mkdir -p "$AGENT_ENV_HERD_VALET/Sites"
+echo '{"workspaces":[]}' >"$AGENT_ENV_HERD_VALET/workspaces.json"
+cat >"$AGENT_ENV_HERD_BIN" <<EOF
+#!/usr/bin/env bash
+printf '%s|%s\n' "\$PWD" "\$*" >>"$root/herd.log"
+mode=\$(cat "$root/herd-mode" 2>/dev/null)
+reg="$AGENT_ENV_HERD_VALET/workspaces.json"
+[[ "\$mode" == noop ]] && exit 0
+case "\$1" in
+  workspace:delete)
+    [[ "\$mode" == fail-delete ]] && exit 1
+    jq --arg s "\$2" '.workspaces |= map(select(.site != \$s))' "\$reg" >"\$reg.tmp" && mv "\$reg.tmp" "\$reg"
+    rm -f "$AGENT_ENV_HERD_VALET/Sites/\$2" ;;
+  workspaces)
+    tmp=\$(mktemp); jq -c '.workspaces[]' "\$reg" | while read -r rec; do
+      p=\$(jq -r .path <<<"\$rec"); [[ -d "\$p" ]] && echo "\$rec"; done | jq -s '{workspaces: .}' >"\$tmp" && mv "\$tmp" "\$reg" ;;
+esac
+exit 0
+EOF
+chmod +x "$AGENT_ENV_HERD_BIN"
+herd_adopt() { # path-as-recorded site [link-target]: add a registry record and a Sites link
+  jq --arg s "$2" --arg p "$1" '.workspaces += [{site: $s, path: $p, url: ("http://" + $s + ".test")}]' \
+    "$AGENT_ENV_HERD_VALET/workspaces.json" >"$root/reg.tmp" && mv "$root/reg.tmp" "$AGENT_ENV_HERD_VALET/workspaces.json"
+  ln -s "${3:-$1}" "$AGENT_ENV_HERD_VALET/Sites/$2"
+}
+herd_calls() { [[ -f "$root/herd.log" ]] && wc -l <"$root/herd.log" | tr -d ' ' || echo 0; }
 
 failures=0
 check() { # label exit-code-of-the-condition
@@ -185,6 +219,89 @@ check "(d) destroy x from the main checkout removes the worktree and frees the s
 check "(d) branch worktree-x deleted (no unique commits)" $?
 [[ -z "$(git -C "$repo" status --porcelain)" ]]
 check "(d) main checkout is clean after the round-trip" $?
+[[ ! -e "$root/herd.log" ]]
+check "(h) an env Herd never adopted makes no herd call on destroy (empty registry)" $?
+
+# (h) Herd adoption. The registry starts with a decoy from another repo that
+# shares the branch name and must never be touched; u is never adopted, h is.
+herd_has() { jq -e --arg s "$1" 'any(.workspaces[]; .site == $s)' "$AGENT_ENV_HERD_VALET/workspaces.json" >/dev/null; }
+mkdir -p "$root/other/.claude/worktrees/h"
+herd_adopt "$root/other/.claude/worktrees/h" worktree-h.other
+ln -s "$root/elsewhere" "$AGENT_ENV_HERD_VALET/Sites/other.repo"
+wtu="$repo/.claude/worktrees/u"; wth="$repo/.claude/worktrees/h"
+(cd "$repo" && ./scripts/agent-env.sh create u >/dev/null 2>&1)
+(cd "$repo" && ./scripts/agent-env.sh create h >/dev/null 2>&1)
+herd_adopt "$wth" worktree-h.repo
+out=$(cd "$repo" && ./scripts/agent-env.sh list 2>&1)
+contains "$out" "^ adopted by Herd as worktree-h.repo" && [[ $(grep -c 'adopted by Herd' <<<"$out") -eq 1 ]]
+check "(h) list flags the adopted env only, not an unadopted one or another repo's record" $?
+# destroyed from inside u, Herd is still driven from the main checkout
+out=$(cd "$wtu" && ./scripts/agent-env.sh destroy h 2>&1); rc=$?
+[[ $rc -eq 0 && ! -e "$wth" ]] && contains "$out" "unlinked 'h' from Herd (it had been adopted as worktree-h.repo)"
+check "(h) destroy of an adopted env reports the unlink once Herd's registry no longer has it" $?
+expected=$(printf '%s|processes:stop %s --site=worktree-h.repo\n' "$repo" dev "$repo" vite "$repo" pail "$repo" queue
+  printf '%s|workspace:delete worktree-h.repo --keep-files --force\n' "$repo")
+[[ "$(cat "$root/herd.log")" == "$expected" ]]
+check "(h) from the main checkout, by the env's own site: stop dev, vite, pail, queue, then workspace:delete --keep-files --force" $?
+herd_has worktree-h.other && ! herd_has worktree-h.repo && [[ -L "$AGENT_ENV_HERD_VALET/Sites/other.repo" ]]
+check "(h) the other repo's same-named record and an unrelated link are left alone" $?
+n=$(herd_calls); (cd "$repo" && ./scripts/agent-env.sh destroy u >/dev/null 2>&1)
+[[ ! -e "$wtu" && "$(herd_calls)" == "$n" ]]
+check "(h) destroying an unadopted env makes no herd call while the registry has records" $?
+
+# Herd's wrapper exits 0 having done nothing when it can't find its php (a hook
+# or GUI client's PATH): destroy must not take the exit code's word for it
+wtn="$repo/.claude/worktrees/n"
+(cd "$repo" && ./scripts/agent-env.sh create n >/dev/null 2>&1)
+herd_adopt "$wtn" worktree-n.repo
+echo noop >"$root/herd-mode"
+out=$(cd "$repo" && ./scripts/agent-env.sh destroy n 2>&1); rc=$?
+rm -f "$root/herd-mode"
+[[ $rc -eq 0 && ! -e "$wtn" && ! -L "$AGENT_ENV_HERD_VALET/Sites/worktree-n.repo" ]] \
+  && ! contains "$out" "unlinked 'n'" && contains "$out" "didn't remove it" \
+  && contains "$out" "Herd still lists worktree-n.repo; run 'herd workspaces --all' before re-creating 'n'"
+check "(h) a herd that exits 0 without unlinking: destroy warns, completes, removes the dangling link, says the record survived" $?
+
+# workspace:delete failing (Herd not running): destroy completes, removes the
+# dangling link and has Herd's own listing prune the record
+wtf="$repo/.claude/worktrees/f"
+(cd "$repo" && ./scripts/agent-env.sh create f >/dev/null 2>&1)
+herd_adopt "$wtf" worktree-f.repo
+echo fail-delete >"$root/herd-mode"
+out=$(cd "$repo" && ./scripts/agent-env.sh destroy f 2>&1); rc=$?
+rm -f "$root/herd-mode"
+[[ $rc -eq 0 && ! -e "$wtf" && ! -L "$AGENT_ENV_HERD_VALET/Sites/worktree-f.repo" ]] && ! herd_has worktree-f.repo \
+  && contains "$out" "removed Herd's dangling site link worktree-f.repo" \
+  && contains "$out" "pruned Herd's record for worktree-f.repo" \
+  && grep -qxF "$repo|workspaces --all --json" "$root/herd.log"
+check "(h) with workspace:delete failing, destroy completes, removes the dangling link and has Herd prune its record" $?
+
+# destroy through a symlinked spelling of the repo: Herd records the real path,
+# but a record or link using either spelling must be matched
+ln -s "$repo" "$root/repolink"
+for spelling in real logical; do
+  e="s-$spelling"; wts="$repo/.claude/worktrees/$e"; lns="$root/repolink/.claude/worktrees/$e"
+  (cd "$repo" && ./scripts/agent-env.sh create "$e" >/dev/null 2>&1)
+  if [[ $spelling == real ]]; then herd_adopt "$wts" "worktree-$e.repo"; else herd_adopt "$lns" "worktree-$e.repo"; fi
+  echo fail-delete >"$root/herd-mode"
+  out=$(cd "$repo" && ./scripts/agent-env.sh destroy "$lns" 2>&1); rc=$?
+  rm -f "$root/herd-mode"
+  [[ $rc -eq 0 && ! -e "$wts" && ! -L "$AGENT_ENV_HERD_VALET/Sites/worktree-$e.repo" ]] \
+    && grep -qxF "$repo|workspace:delete worktree-$e.repo --keep-files --force" "$root/herd.log"
+  check "(h) destroy via a symlinked path matches a record and a link that use the $spelling path" $?
+done
+
+# a Sites link under the env's site name that points somewhere else is not the env's to remove
+wtg="$repo/.claude/worktrees/g"
+(cd "$repo" && ./scripts/agent-env.sh create g >/dev/null 2>&1)
+herd_adopt "$wtg" worktree-g.repo "$root/elsewhere-g"
+echo fail-delete >"$root/herd-mode"
+(cd "$repo" && ./scripts/agent-env.sh destroy g >/dev/null 2>&1)
+rm -f "$root/herd-mode"
+[[ ! -e "$wtg" && -L "$AGENT_ENV_HERD_VALET/Sites/worktree-g.repo" ]]
+check "(h) a dangling link with the env's site name but another target is left alone" $?
+[[ -z "$(git -C "$repo" status --porcelain)" ]] && herd_has worktree-h.other
+check "(h) main checkout is clean and the other repo's record survived every case" $?
 
 # the shipped example configs load unchanged (the "restate everything" case)
 mkdir -p "$cfgdir/example" "$cfgdir/example-wp"

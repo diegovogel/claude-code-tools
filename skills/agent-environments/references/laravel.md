@@ -9,22 +9,131 @@ Laravel-specific fill-in. The same shape applies to any PHP/Composer app.
 
 ## Serve with `php artisan serve`, not Herd/Valet
 
-Laravel devs usually run sites through **Herd** (or Valet) at `<name>.test` on
-port 80, via directory parking + a local DNS/nginx layer. That model is great for
-normal dev but wrong for agent envs: it's **domain-based, not port-based**, serves
-on a shared :80, and can't run N parallel copies of the *same* app on distinct
-ports. The engine is built on deterministic per-slot ports.
-
-So: serve each env with **`php artisan serve --host=127.0.0.1 --port=<slot port>`**.
-It's built into Laravel (no dependency), binds an explicit port, and matches the
-slot scheme exactly. **Keep Herd as the provider** of the toolchain, it puts
+Laravel devs usually run sites through **Herd** (or Valet) at `<name>.test`.
+Since Herd 2.0 it can serve each git worktree as well, at `<branch>.<site>.test`
+(its "workspaces"), so the old reason for avoiding it (one copy of a site, on a
+shared :80) is gone. Envs still serve with
+**`php artisan serve --host=127.0.0.1 --port=<slot port>`**, because letting Herd
+serve an env costs more than it buys today: adoption edits the env's `.env`, a
+Herd-served env gets a Herd-started `php artisan dev` stack whenever its Vite is
+down, and Herd's own delete and merge bypass the guarded teardown (measurements
+and what a Herd-served flavor would need:
+[Herd 2.0 workspaces](#herd-20-workspaces)). `artisan serve`
+is built into Laravel, binds the slot's explicit port, and fits the engine's
+port-based slots, `serve`/`stop` and health checks. **Keep Herd as the provider**
+of the toolchain, it puts
 `php`, `composer`, `mysql`, and `redis` on `PATH` and runs the shared MySQL/Redis
 services. You use Herd's binaries and services; you just don't use Herd as the
 per-env web server.
 
 (If the project ships a `composer dev` script, it runs `artisan serve` + queue +
 Vite on *fixed* ports via `concurrently`, so it WILL collide between envs. Treat
-it like `npm run dev`: name it in `MAIN_DEV_CMD` and guard it.)
+it like `npm run dev`: name it in `MAIN_DEV_CMD` and guard it. Newer skeletons'
+`composer dev` runs `@php artisan dev` instead (check composer.json), and
+`php artisan dev` itself has no guard; see the gotcha below.)
+
+## Herd 2.0 workspaces
+
+Measured 2026-10-21 on Herd 2.0.0 with throwaway worktrees of a SQLite Laravel 13.35 app,
+and cross-checked against the Herd CLI source (`herd.phar` in Herd.app's
+Resources: `cli/Valet/Workspace.php`, `GitWorktrees.php`,
+`WorkspaceDatabase.php`, `Drivers/LaravelValetDriver.php`). Re-check before
+building on it; Herd moves fast.
+
+- **Discovery.** Herd lists every linked worktree of a site's repo, wherever it
+  lives, as an unserved workspace (`herd workspaces --site=<site>`). The host is
+  the sanitized branch plus the site, `worktree-<name>.<site>.test` for an env.
+  The label is cut to `54 - len(site)` characters, so long env names sharing a
+  prefix map to one host.
+- **Adoption.** A GET of that host returns a 503 setup page whose script POSTs
+  to Herd's API (`127.0.0.1:2304/workspaces/serve`), which adopts the worktree
+  in shared-database mode with no prompt. curl alone changes nothing; a browser
+  or Playwright adopts it. `herd workspace` run inside a worktree adopts it too,
+  using `herd.yml`'s database default.
+- **What adoption writes.** It never replaces an existing `.env`. It rewrites
+  the FIRST existing `APP_URL` line (it never adds one), and the first
+  `SESSION_DOMAIN` / `SANCTUM_STATEFUL_DOMAINS` line when it names the parent.
+  Only `herd.yml` `workspaces.env` keys and a shared-SQLite `DB_DATABASE` are
+  appended when missing, at the very end of the file. The managed block still
+  wins only because an env's copied base `.env` has its own `APP_URL` line
+  above it (Laravel reads the last duplicate); without one, Herd rewrites the
+  block's `APP_URL`. With SQLite in shared mode, a worktree whose relative
+  database file doesn't exist yet gets `DB_DATABASE=<main's file, absolute>`;
+  a bare worktree adopted that way had Herd's first probe write a session row
+  into main's database. Herd copies main's `.env` (plain copy) only when the
+  env has none, and `vendor/` / `node_modules/` (APFS `cp -c -R`) only when
+  absent and the first lockfile matches main's byte for byte. It copies main's
+  `public/build` into an env with neither `public/build` nor `public/hot`, so
+  the env can render main's stale assets while its Vite is down. It deletes
+  `public/hot`, runs `artisan config:clear && route:clear`, writes
+  `.herd-workspace.json` (excluded through the repo's shared
+  `.git/info/exclude`; the marker outlives an unlink), links the host without
+  `.test` (`Sites/worktree-<name>.<site>`), and for a secured parent issues a
+  certificate and restarts nginx.
+- **Automatic dev server.** With Herd Studio on (the default), a GET of a
+  Herd-served Laravel site whose Vite isn't live asks Herd to start the site's
+  dev stack: `php artisan dev --json` when DevCommand has `--json` (13.25+) and
+  `node_modules/@laravel/multiplex` exists (`artisan serve` on :8000 or
+  `SERVER_PORT`, `queue:listen`, pail, and the package.json `dev` script, which
+  the guard refuses), the package.json dev script otherwise. It skips a site
+  whose `public/hot` points at a live server, so an env under `serve` is left
+  alone, but only while `public/hot` exists: adoption deletes it, so an env
+  adopted while under `serve` loses HMR (or 500s on `@vite` with no build) and
+  becomes eligible for the boot until `stop` and `serve` restart Vite. To stop
+  a Herd-started stack in an adopted env you are keeping (`destroy` does this
+  itself), name the workspace's Sites name (the
+  marker's `site`, no `.test`): `herd processes --site=<site> --json` to
+  confirm, then `herd processes:stop dev --site=<site>`. Never pass the parent
+  site's name, and never a path inside an unadopted env: both resolve to the
+  main checkout and stop the human's stack.
+- **Serving.** Herd's PHP-FPM answered 4 concurrent 1.5 s requests in 2.4 s on 4
+  workers; `artisan serve` took 6.1 s on one. Insights captured every
+  Herd-served request and none of `artisan serve`'s (its `php -S` runs from
+  `public/`, where Herd's injector bails). An HTTPS workspace page loading Vite
+  from `http://127.0.0.1:<port>` worked in Chromium, HMR included, because
+  loopback is exempt from mixed-content blocking. Safari not checked.
+- **Teardown.** `herd workspace:delete` runs `herd.yml`'s `before_delete` hook,
+  unlinks and unsecures, drops a non-shared database, then runs
+  `git worktree remove --force` (no dirty or unpushed check; a test worktree's
+  uncommitted files were deleted) unless `--keep-files`. It never deletes the
+  branch. When a worktree is removed behind Herd's back, the next
+  `herd workspaces` prunes the registry record and certificate but leaves a
+  dangling `Sites/worktree-<name>.<site>` symlink, which `herd unlink` reports
+  removing and doesn't. Until something prunes the record, re-creating an env
+  at the same path inherits the stale record and link.
+- **Lookup by name.** `herd workspace:delete <arg>` acts on the first registry
+  record whose `name` or `site` matches, and `name` is the sanitized branch
+  (`worktree-<name>`), which repeats across repos. Only the `site` (host
+  without `.test`) is unique.
+- **Merge.** `herd workspace:merge` fast-forwards the base branch recorded at
+  adoption (whatever the main checkout had checked out then), or falls back to
+  `git merge` inside the main checkout's working tree; `--push` pushes it.
+  Denied for Claude by `Bash(herd workspace:merge *)` in
+  `~/.claude/settings.json`.
+- **What the engine does about adoption.** The registry,
+  `~/Library/Application Support/Herd/config/valet/workspaces.json`, holds
+  only adopted (served) workspaces, so the engine reads it with `jq`, matching
+  the env's path. `list` prints an "adopted by Herd" line under such an env.
+  `destroy` runs `herd processes:stop <p> --site=<site>` for dev, vite, pail
+  and queue, then `herd workspace:delete <site> --keep-files --force`, all from
+  the main checkout and before its own guarded removal. It runs `herd` with
+  Herd's bin dir appended to PATH, because the `herd` wrapper exits 0 having
+  done nothing when it can't find Herd's php (a git hook or GUI client), and it
+  judges the unlink by the registry, not the exit code. When the record
+  survives (Herd not running), it removes the env's `Sites/<site>` link once
+  the worktree is gone (only if it dangles and points at the env), then runs
+  `herd workspaces --all --json`, whose orphan pruning needs no running app,
+  and warns only if the record is still there. Live-checked on Herd 2.0.0; the
+  engine test covers each branch with a fake registry and a stub `herd`.
+
+**A Herd-served env flavor** (not built) would trade `artisan serve` for FPM
+concurrency, Herd's php.ini and Insights. It would need: the managed block's
+`APP_URL` set to the workspace URL; `project_health_urls` probing that URL;
+Herd's automatic dev server kept off for envs (Herd Studio's per-site toggle;
+`SERVER_PORT=<web port>` in the managed block would at least keep its server
+off main's :8000, and in this flavor the env runs no `artisan serve` of its own
+to collide with). `destroy` already unlinks an adopted env, so teardown needs
+nothing new.
 
 ## Database isolation depends on the engine
 
@@ -55,7 +164,7 @@ PORT_BASE=18000          # pick a base unused by other projects you run in paral
 PORT_STRIDE=10
 PORTS_PER_ENV=2          # web (artisan serve) + Vite. Set 1 if the app has no
                          # front end, or for Laravel Mix (see Variants below).
-MAIN_DEV_CMD="php artisan serve / composer dev"
+MAIN_DEV_CMD="composer dev / php artisan dev"  # php artisan dev (Laravel 13.16+) has no guard
 
 # DB isolation for THIS project: "sqlite" or "mysql".
 DB_STRATEGY="sqlite"
@@ -113,11 +222,12 @@ project_env_port_lines() {
 project_main_ports() { :; }
 
 # Herd's PHP finds its php.ini through HERD_PHP_<ver>_INI_SCAN_DIR, which the
-# user's shell exports but an agent's Bash session does not have. Without it the
+# user's shell exports and an agent's Bash session may lack. Without it the
 # served PHP loads no ini at all and runs on built-in defaults (2M uploads, 8M
 # POST bodies) instead of Herd's, so file uploads over 2 MB fail in an env that
 # an agent started while the same code works on the Herd site. `artisan serve`
-# passes the variable through to its `php -S` child. No-op without Herd.
+# passes the variable through to its `php -S` child. No-op without Herd, or
+# when the variable is already set.
 project_herd_php_ini() {
   local version var dir
   version="$(php -r 'echo PHP_MAJOR_VERSION.PHP_MINOR_VERSION;')"
@@ -227,14 +337,28 @@ project_pre_destroy() {
   `.env.example` (the guard `grep -q '^APP_KEY=base64:'` handles this).
 - **Herd MySQL is TCP-only here.** Connect via `-h 127.0.0.1 -P 3306`, the default
   socket `/tmp/mysql.sock` isn't where Herd puts it.
-- **Herd's php.ini is not loaded from an agent's shell.** Herd's `php` locates its
-  ini via `HERD_PHP_<ver>_INI_SCAN_DIR`, exported by the user's `~/.zshrc` and
-  absent from Claude Code's Bash. A server started without it runs on PHP's
-  built-in limits (`upload_max_filesize=2M`), so uploads over 2 MB fail in the env
-  but work on the Herd site, which looks like an app bug. `project_herd_php_ini`
-  (above) exports the variable before `serve`; check with
-  `php -r 'echo ini_get("upload_max_filesize");'` from the same shell. Hit on
-  2026-09-14.
+- **Herd's php.ini is not always loaded from an agent's shell.** Herd's `php`
+  locates its ini via `HERD_PHP_<ver>_INI_SCAN_DIR`, exported by the user's
+  `~/.zshrc`; whether Claude Code's Bash has it depends on how that shell was
+  started (absent on 2026-09-14, present on 2026-10-21). A server started
+  without it runs on PHP's built-in limits (`upload_max_filesize=2M`), so uploads
+  over 2 MB fail in the env but work on the Herd site, which looks like an app
+  bug. `project_herd_php_ini` (above) exports the variable before `serve` and is
+  a no-op when it's already set; check with
+  `php -r 'echo ini_get("upload_max_filesize");'` from the same shell.
+- **`php artisan dev` gets past the guard (Laravel 13.16+).** The guard is the
+  first step of `composer dev` and `npm run dev`; `php artisan dev` is neither,
+  whatever `composer dev` runs (newer skeletons' `composer dev` calls it, older
+  ones run their own `concurrently` line). Run directly, by an agent or by
+  Herd's automatic dev server, it starts `artisan serve` on :8000 (main's dev
+  port), `queue:listen` and pail, and only its Vite child (the guarded
+  `npm run dev`) is refused. `MAIN_DEV_CMD` only feeds the engine's messages,
+  so name it there and in the project CLAUDE.md rule: the rule is the only
+  protection. `artisan serve` takes its default port from `SERVER_PORT` in
+  `.env` (verified), so `SERVER_PORT=<web port>` in the managed block would
+  keep such a server off main's :8000. The cost: with a port set it never
+  falls back to another, so a stray server started while `serve` is down holds
+  the slot's port and the next `serve` fails with port in use.
 - **`migrate --seed` is for a *fresh* per-env DB.** That's the case here (new
   schema / new sqlite file). Don't point an env at a shared/populated DB.
 - **A green in-env test run does not prove the per-env DB.** `phpunit.xml` usually

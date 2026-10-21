@@ -37,7 +37,7 @@ PORT_STRIDE=2                         # spacing between a slot's ports; must be 
                                        # adjacent slots overlap. Defaults to exactly PORTS_PER_ENV
                                        # (densest, no wasted ports); raise only for headroom.
 PORTS_PER_ENV=2                        # distinct localhost ports each env reserves
-MAIN_DEV_CMD="npm run dev"             # named in messages and the in-env guard
+MAIN_DEV_CMD="npm run dev"             # named in the engine's messages (the guard never reads it)
 LOCKFILES="package-lock.json"          # lockfiles whose change in a pull triggers
                                        # project_sync_deps (space-separated, repo-root-
                                        # relative; e.g. "composer.lock package-lock.json")

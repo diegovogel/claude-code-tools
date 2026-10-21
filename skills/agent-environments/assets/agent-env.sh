@@ -196,6 +196,46 @@ unique_commits() {  # repo branch
     --not --exclude="$2" --branches --remotes 2>/dev/null || echo "?"
 }
 
+# Herd 2.0 lists every linked worktree of a Herd site as a "workspace", and
+# opening its <branch>.<site>.test URL in a browser adopts it: Herd links it as
+# a site, may secure it, records it in its registry and edits its .env
+# (references/laravel.md, "Herd 2.0 workspaces"). Envs are never meant to be
+# adopted; these helpers spot one that was so list can flag it and destroy can
+# undo Herd's side. All best-effort, and silent where Herd isn't installed.
+# AGENT_ENV_HERD_VALET and AGENT_ENV_HERD_BIN exist so tests can stand in a
+# fake registry and a stub herd.
+HERD_VALET_DIR="${AGENT_ENV_HERD_VALET:-$HOME/Library/Application Support/Herd/config/valet}"
+
+herd_site_for() {  # env-path -> its Herd site name (host without TLD), or nothing
+  local registry="$HERD_VALET_DIR/workspaces.json" envp
+  [[ -f "$registry" ]] && command -v jq >/dev/null 2>&1 || return 0
+  envp=$(cd "$1" 2>/dev/null && pwd -P) || return 0
+  jq -r --arg a "$1" --arg b "$envp" \
+    'first(.workspaces[]? | select(.path == $a or .path == $b) | .site // empty)' \
+    "$registry" 2>/dev/null || true
+}
+
+herd_has_site() {  # site -> true while Herd's registry still records it
+  jq -e --arg s "$1" 'any(.workspaces[]?; .site == $s)' \
+    "$HERD_VALET_DIR/workspaces.json" >/dev/null 2>&1
+}
+
+herd_bin() {  # path of the herd CLI, or nothing
+  if [[ -n "${AGENT_ENV_HERD_BIN:-}" ]]; then printf '%s' "$AGENT_ENV_HERD_BIN"; return; fi
+  command -v herd 2>/dev/null && return
+  local b="$HOME/Library/Application Support/Herd/bin/herd"
+  [[ -x "$b" ]] && printf '%s' "$b" || true
+}
+
+# `herd` is a wrapper that looks up Herd's own php on PATH; when it can't (a git
+# hook or GUI client without Herd's bin dir on PATH) it prints an error and
+# exits 0 having done nothing. So the bin dir is appended (never prepended), and
+# callers judge success by the registry, never by the exit code.
+herd_run() {  # main-checkout herd-cli args...
+  local main="$1" cli="$2"; shift 2
+  ( cd "$main" && PATH="$PATH:${cli%/*}" "$cli" "$@" ) >/dev/null 2>&1
+}
+
 # Ports for a slot: PORTS_PER_ENV consecutive ports starting at PORT_BASE+STRIDE*slot.
 ports_for_slot() {
   (( PORT_STRIDE >= PORTS_PER_ENV )) || die "PORT_STRIDE ($PORT_STRIDE) must be >= PORTS_PER_ENV ($PORTS_PER_ENV); adjacent slots would overlap"
@@ -551,7 +591,7 @@ cmd_view() {
 # list: every worktree with branch / dirty / unpushed / ports / serving.
 # ---------------------------------------------------------------------------
 cmd_list() {
-  local main wt branch dirty uniq ports serving
+  local main wt branch dirty uniq ports serving herd_site
   main=$(main_root)
   printf 'main checkout: %s  [%s]\n\n' "$main" "$(main_state "$main")"
   printf '%-22s %-32s %-7s %-9s %-13s %s\n' "NAME" "BRANCH" "DIRTY" "UNIQUE" "PORTS" "SERVING"
@@ -566,6 +606,8 @@ cmd_list() {
     serving="no"
     any_pid_alive "$wt" && serving="yes"
     printf '%-22s %-32s %-7s %-9s %-13s %s\n' "$(basename "$wt")" "$branch" "$dirty" "$uniq" "$ports" "$serving"
+    herd_site=$(herd_site_for "$wt")
+    [[ -z "$herd_site" ]] || printf '  ^ adopted by Herd as %s: never open its .test URL; destroy unlinks it\n' "$herd_site"
   done
 }
 
@@ -610,6 +652,33 @@ cmd_destroy() {
     fi
   fi
 
+  # An env Herd adopted is unlinked through Herd while its files still exist,
+  # keeping them; removing the worktree first leaves a dangling Sites link that
+  # neither Herd's cleanup nor `herd unlink` can remove. Herd's own delete is
+  # never called without --keep-files (that is `git worktree remove --force`
+  # with no checks), and never by the bare branch name, which can match a
+  # same-named env in another repo: the registry's site is unique. Herd's dev
+  # processes for the env (dev, vite, pail, queue) are stopped first, by that
+  # same site name, since Herd's delete leaves them running. The delete also
+  # drops a database Herd itself created for the env (never a shared one).
+  local herd_site herd_cli="" herd_unlinked=0 p
+  herd_site=$(herd_site_for "$env")
+  if [[ -n "$herd_site" ]]; then
+    herd_cli=$(herd_bin)
+    if [[ -n "$herd_cli" ]]; then
+      for p in dev vite pail queue; do
+        herd_run "$main" "$herd_cli" processes:stop "$p" --site="$herd_site" || true
+      done
+      herd_run "$main" "$herd_cli" workspace:delete "$herd_site" --keep-files --force || true
+      [[ -n "$(herd_site_for "$env")" ]] || herd_unlinked=1
+    fi
+    if (( herd_unlinked )); then
+      say "unlinked '$name' from Herd (it had been adopted as $herd_site)"
+    else
+      warn "'$name' was adopted by Herd as $herd_site and herd workspace:delete didn't remove it (is Herd running?); cleaning up after the worktree is gone"
+    fi
+  fi
+
   # Stack-specific teardown (e.g. drop a per-env database) now that the guards
   # have passed but the worktree is still present. Failure is non-fatal.
   local slot=""
@@ -619,6 +688,26 @@ cmd_destroy() {
   git -C "$main" worktree remove "$env" 2>/dev/null \
     || git -C "$main" worktree remove --force "$env"  # ignored files (deps etc.) can block plain remove
   git -C "$main" worktree prune
+
+  # If Herd's delete didn't run, its Sites link for the env now dangles; remove
+  # it, but only that link and only when it points at this env. Then let Herd's
+  # own listing prune the orphaned record (and its certificate and PHP
+  # isolation; that needs no running Herd app), so re-creating an env of this
+  # name can't inherit the stale adoption.
+  if [[ -n "$herd_site" ]]; then
+    local link="$HERD_VALET_DIR/Sites/$herd_site"
+    if [[ -L "$link" && ! -e "$link" && ( "$(readlink "$link")" == "$env" || "$(readlink "$link")" == "$envp" ) ]]; then
+      rm -f "$link" && say "removed Herd's dangling site link $herd_site"
+    fi
+    if (( ! herd_unlinked )); then
+      [[ -z "$herd_cli" ]] || herd_run "$main" "$herd_cli" workspaces --all --json || true
+      if herd_has_site "$herd_site"; then
+        warn "Herd still lists $herd_site; run 'herd workspaces --all' before re-creating '$name'"
+      else
+        say "pruned Herd's record for $herd_site"
+      fi
+    fi
+  fi
 
   # A branch with no unique commits carries nothing found nowhere else, so delete
   # it (this is what lets `destroy foo` -> `create foo` reuse the name). A branch

@@ -183,8 +183,10 @@ back down so the next `serve` doesn't see stale PID files.
 
 This is the least portable function, local dev launch differs wildly:
 - **Laravel**: `php artisan serve --port=<web>` + `npx vite --port=<vite>` (not
-  `npm run dev`, which carries the guard) + maybe `php artisan queue:work`. Serve via `artisan serve`, NOT Herd/Valet (they are
-  domain-based on :80, not per-port). Full worked example in [`laravel.md`](laravel.md).
+  `npm run dev`, which carries the guard) + maybe `php artisan queue:work`. Serve via `artisan serve`, not Herd: Herd 2.0 can
+  serve worktrees, but adopting an env edits its `.env` and starts Herd's own dev
+  stack in it (see `laravel.md`, "Herd 2.0 workspaces"). Full worked example in
+  [`laravel.md`](laravel.md).
 - **Single-server apps**: one process, one PID file, one health URL.
 - **Compiled/long-build apps**: you may want a build step before launch.
 

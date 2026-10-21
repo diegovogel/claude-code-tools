@@ -75,8 +75,11 @@ This was the single hardest WP bug to find: serve appeared to "hang" while the
 server was actually listening but unable to answer.
 
 Herd still provides the toolchain (`php`, `composer`, `wp`, `mysql`) and runs the
-shared MySQL. We just don't use Herd as the per-env web server (it's domain-based on
-:80 and can't run N parallel copies of one site on distinct ports).
+shared MySQL. We just don't use Herd as the per-env web server. Herd 2.0's
+workspaces serve a git worktree of a *site's own* repo, but here the Herd site is
+the WordPress install while the repo is a theme or plugin inside it, and
+workspace database isolation keys off a Laravel `.env` that WordPress doesn't
+have. So an env is a full-install clone on its own `wp server` port.
 `node`/`npm` are NOT part of that toolchain: the engine prepends Herd's bin,
 Homebrew and `/usr/local/bin` to PATH, but node comes from nvm, whose bin dir only
 the interactive shell adds. Every hook that calls npm (a `project_after_worktree`

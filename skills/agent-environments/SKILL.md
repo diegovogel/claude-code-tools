@@ -232,6 +232,40 @@ CLAUDE.md too. The reasoning:
     is in `main` and only the SHAs differ, so `--force` loses nothing; it keeps
     the branch, which you then delete by hand. A non-empty diff means real
     unmerged work — stop and find out why.
+- **Keep Herd (2.0+) away from envs.** When the main checkout is itself a Herd
+  site (the Laravel flow), Herd lists every env as an unserved workspace at
+  `worktree-<name>.<site>.test` and can reach into it in ways the engine never
+  sees:
+  - Opening that URL in anything that runs JavaScript (a browser, Playwright,
+    `herd workspace:open`; plain curl doesn't) adopts the env with no prompt,
+    and so does `herd workspace` run inside it. Adoption edits the env's `.env`
+    in place (the first `APP_URL=` line; for a SQLite env whose database file
+    doesn't exist yet, `DB_DATABASE` becomes main's file by absolute path).
+  - Once adopted, a page request while the env's own Vite is down makes Herd
+    start `php artisan dev` inside the env (Laravel 13.25+ with
+    `@laravel/multiplex` installed and Herd Studio on; otherwise the
+    package.json dev script, which the guard refuses): a server on :8000 and a
+    second queue worker, outside `serve`/`stop`. Adoption also deletes
+    `public/hot`, so an env adopted while under `serve` loses HMR and counts
+    as Vite-down until you `stop` and `serve` it again.
+  - Herd's Delete (its Applications window or `herd workspace:delete`) runs
+    `git worktree remove --force` with no dirty or unpushed check, and
+    `herd workspace:merge` moves the base branch with no PR (denied for
+    Claude in `~/.claude/settings.json`).
+
+  So test an env on its own ports, never its `.test` URL, and never run
+  `herd workspace*` on an env from anywhere: not inside it, and not by name or
+  path from the main checkout. If an env does get adopted, the engine handles
+  Herd's side: `list` flags it (reading Herd's registry), and `destroy` stops
+  Herd's dev processes for it and unlinks it through
+  `herd workspace:delete <site> --keep-files --force`, by the registry's
+  unique site rather than the branch name, before removing the worktree. It
+  trusts Herd's registry, not the exit code, and when the delete couldn't run
+  (Herd not running) it removes the dangling Sites link and has Herd's own
+  listing prune the record. Don't unlink or delete an env through Herd
+  yourself; to stop a Herd-started stack in an env you are keeping, use the
+  recipe in laravel.md. Evidence:
+  [`references/laravel.md`](references/laravel.md#herd-20-workspaces).
 - **Never `git clean -fdx` at the main checkout root.** Envs are nested and
   gitignored, so `-x` would delete every one of them.
 - **Don't hand-rename env branches.** `provision` owns and enforces the canonical
@@ -689,7 +723,9 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   and checks the config contract (a missing or incomplete config dies naming
   the path and what is missing), the shim's `guard` in both flows, and a
   create / list / provision-from-inside / run / serve / view / destroy round-trip
-  that leaves the main checkout clean. `node tests/<file>` and
+  that leaves the main checkout clean, plus the Herd-adoption cleanup in
+  `list` and `destroy` against a fake Herd registry and a stub `herd`
+  (`AGENT_ENV_HERD_VALET`, `AGENT_ENV_HERD_BIN`). `node tests/<file>` and
   `bash tests/engine-config-test.sh` exit non-zero on a failure. Change a hook
   or an engine, run its test.
 - [`assets/session-start-reanchor.sh`](assets/session-start-reanchor.sh): a
@@ -707,7 +743,9 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   Read this before writing a project's config.
 - [`references/laravel.md`](references/laravel.md): a complete worked Laravel/PHP
   project config (serve via `artisan serve` not Herd, SQLite/MySQL/Redis
-  isolation, queue worker, per-env DB create + drop), plus dogfooding targets.
+  isolation, queue worker, per-env DB create + drop), plus dogfooding targets
+  and the measured Herd 2.0 workspace behavior behind the "keep Herd away"
+  rule.
 - [`references/shopify.md`](references/shopify.md): the no-engine playbook for
   Shopify themes and other no-local-state stacks (a worktree plus a per-env
   dev-server port; create, serve, verify, operate, tear down).
