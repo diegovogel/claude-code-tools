@@ -10,7 +10,7 @@ metadata:
 
 An AutoCAD extension is a .NET assembly loaded into AutoCAD's process. The fast feedback loop is AutoCAD Core Console (`accoreconsole.exe`), AutoCAD without the UI: it runs a script against a drawing in a few seconds, which makes it the Playwright of this world. Full AutoCAD is needed only for UI (dialogs, palettes, ribbon), and the user drives that part.
 
-**Windows only.** .NET extensions and Core Console exist only in AutoCAD for Windows (AutoCAD for Mac can't load .NET extensions), and the runner expects Git Bash. On a Mac there's nothing here to build or run: the skill's files can be read or edited there, but the AutoCAD work happens on Windows.
+**Windows only.** .NET extensions and Core Console exist only in AutoCAD for Windows (AutoCAD for Mac can't load .NET extensions), and the runner is a Windows PowerShell 5.1 script, which every Windows machine has. On a Mac there's nothing here to build or run: the skill's files can be read or edited there, but the AutoCAD work happens on Windows.
 
 ## Core rules
 
@@ -29,7 +29,7 @@ An AutoCAD extension is a .NET assembly loaded into AutoCAD's process. The fast 
 | Build | Compiles against the right AutoCAD assemblies, with no new warnings | `dotnet build --no-incremental`, compared with the project's baseline warning count |
 | Unit tests | Pure logic | A plain test project. Keep AutoCAD types out of the code under test; they only work inside AutoCAD. |
 | In-process tests | Code that needs a live drawing database | NUnit tests run by NUnitLite inside Core Console (`headless-testing.md`, In-process tests) |
-| Scripted QA | A command end to end on a real drawing | `scripts/run-core-console.sh` with a steps file; check printed markers, dumped entities or a plotted PNG |
+| Scripted QA | A command end to end on a real drawing | `scripts/run-core-console.ps1` with a steps file; check printed markers, dumped entities or a plotted PNG |
 | User QA | Dialogs, palettes, ribbon, anything that needs the full UI | The user drives full AutoCAD; you write the steps and check their report |
 
 Climb only as high as the change needs, but don't skip a rung the change touches. Say plainly when something wasn't verified.
@@ -60,8 +60,8 @@ Format: a one-line tip, or **Symptom / Cause / Fix** for anything that took real
 
 - `gotchas.md`: lessons by topic. Read first.
 - `headless-testing.md`: the Core Console runner, steps files, staging builds, in-process NUnit tests, plotting to PNG.
-- `scripts/run-core-console.sh`: the runner.
-- `scripts/selftest.sh`: checks that the runner still tells passing runs from failing ones. Run it after changing the runner.
+- `scripts/run-core-console.ps1`: the runner.
+- `scripts/selftest.ps1`: checks that the runner still tells passing runs from failing ones. Run it after changing the runner.
 
 The headless approach draws on Autodesk's ADN-DevTech `acad-api-skill` and `coreconsolerunner` and on `Abo-Eyad/AutoCAD-AccoreConsole-headless` (all MIT), rewritten and retargeted to AutoCAD 2026.
 

@@ -1,2 +1,2 @@
-# Bash scripts break with CRLF, which a Windows checkout with core.autocrlf=true would produce.
-*.sh text eol=lf
+# The PowerShell scripts get CRLF, Windows' own line ending, in every checkout, whatever core.autocrlf says.
+*.ps1 text eol=crlf
