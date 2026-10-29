@@ -1,0 +1,2 @@
+# Bash scripts break with CRLF, which a Windows checkout with core.autocrlf=true would produce.
+*.sh text eol=lf

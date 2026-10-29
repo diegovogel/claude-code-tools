@@ -40,6 +40,7 @@ PATHS=(
   # Skills
   skills/agent-environments
   skills/brainstorm-with-panel
+  skills/developing-autocad-extensions
   skills/security-review-plus
 
   # Templates — single file; the rest of ~/.claude/templates is not tracked.

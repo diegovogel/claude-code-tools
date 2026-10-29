@@ -25,6 +25,7 @@ Some tools require additional dependencies as noted in their details below.
 ### Skills
 * [agent-environments](#skill-agent-environments): sets up a project-specific system for spinning up isolated parallel agent environments, and defines the quality workflow Claude runs in one before a PR.
 * [brainstorm-with-panel](#skill-brainstorm-with-panel): a phased, multi-agent workflow for generating and evaluating creative solutions to hard problems.
+* [developing-autocad-extensions](#skill-developing-autocad-extensions): helps Claude build, test and debug AutoCAD .NET extensions on Windows, checking its own work headlessly with AutoCAD Core Console.
 * [security-review-plus](#skill-security-review-plus): runs a security review that includes a curated checklist of security tips from the excellent [Securing Laravel](https://securinglaravel.com/) newsletter from [Stephen Rees-Carter](https://stephenreescarter.net/) (go sign up!).
 
 ### Other
@@ -185,6 +186,33 @@ The GitHub bot version is still in this repo: [pr-with-codex](commands/pr-with-c
 **Dependencies:**
 * Codex plugin for Claude (optional but recommended). Without it the skill still runs using only Claude, but you lose the cross-model benefit, which is one of the best parts.
 * A ChatGPT account and subscription for Codex, depending on usage.
+
+### Skill: `developing-autocad-extensions`
+
+[View source](skills/developing-autocad-extensions)
+
+**Why it exists:** an AutoCAD extension is a .NET assembly that only runs inside AutoCAD, and Claude can't see or click AutoCAD's UI. Without a headless loop, every check would mean me restarting AutoCAD, running the command, and describing what I saw. On top of that, much of the guidance online (public agent skills included) targets a different AutoCAD release, and releases differ in their .NET runtime, so a project setting or API call that looks right can be wrong for the version at hand.
+
+**What it does:** this skill does four things to help Claude work on AutoCAD extensions:
+1. Runs AutoCAD Core Console (AutoCAD without the UI) through a bundled runner, so Claude can run a script against a drawing and judge the result itself.
+2. Defines a verification ladder (build, unit tests, NUnit tests inside Core Console, scripted QA, then QA by me in full AutoCAD) and has Claude climb only as high as the change needs, one small probe at a time.
+3. Hands anything that needs the full UI (dialogs, palettes, ribbon) to me as one batch of short QA steps, each with the evidence Claude will check afterwards.
+4. Provides a growing list of gotchas, from Core Console quirks to load security, builds, testing, plotting and TFVC.
+
+The skill also self-improves: when Claude hits a new gotcha that meets the inclusion criteria, it adds it to the gotchas file mid-session.
+
+**Highlights:**
+* Core Console is the Playwright of AutoCAD. A scripted run takes a few seconds, so Claude can observe, change and re-check without me opening AutoCAD.
+* The runner judges a run by its output, never its exit code, because Core Console exits 0 even when a command fails. It fails the run on error text (unknown commands, LISP errors, failed loads, unhandled exceptions), on a script that never reached its end marker (it aborted or crashed), and on any missing `;EXPECT` assertion from the steps file. A self-test checks that it still tells a passing run from a failing one.
+* Never switches off AutoCAD's load security. SECURELOAD is saved in the AutoCAD profile, so turning it off for a test would turn it off in the real AutoCAD too. Builds get staged into a trusted dev folder instead.
+* Pins the AutoCAD release before trusting any guidance (2026 runs .NET 8, 2027 moved to .NET 10, 2024 and earlier run .NET Framework 4.8), checks the official docs first, and proves a mechanism headlessly instead of guessing after the first failure.
+* Batches UI checks into one round, because .NET assemblies can't be unloaded from AutoCAD and every round costs a restart.
+
+**Dependencies:**
+* Windows with AutoCAD 2026 or one of its toolsets, such as AutoCAD Electrical (Core Console ships with it). AutoCAD for Mac can't load .NET extensions.
+* Git Bash, for the runner scripts.
+* A .NET SDK that can build `net8.0-windows` (8 or newer).
+* NUnit and NUnitLite in a test project, for the in-process tests.
 
 ### Skill: `security-review-plus`
 
