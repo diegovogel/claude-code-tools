@@ -210,7 +210,7 @@ The skill also self-improves: when Claude hits a new gotcha that meets the inclu
 
 **Dependencies:**
 * Windows with AutoCAD 2026 or one of its toolsets, such as AutoCAD Electrical (Core Console ships with it). AutoCAD for Mac can't load .NET extensions.
-* Git Bash, for the runner scripts.
+* Windows PowerShell 5.1 (built into Windows), for the runner scripts.
 * A .NET SDK that can build `net8.0-windows` (8 or newer).
 * NUnit and NUnitLite in a test project, for the in-process tests.
 

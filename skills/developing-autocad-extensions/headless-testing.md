@@ -4,21 +4,26 @@
 
 ## The runner
 
-```bash
-scripts/run-core-console.sh <steps-file> [drawing.dwg]
+`scripts/run-core-console.ps1` is a Windows PowerShell 5.1 script. Call it from PowerShell (Claude Code's PowerShell tool) by its full path, where `<skill>` is this skill's folder, usually `$HOME\.claude\skills\developing-autocad-extensions`:
+
+```powershell
+& <skill>\scripts\run-core-console.ps1 <steps-file> [drawing.dwg]
 ```
 
-- Appends an end marker and a discard-and-quit to your steps, converts them to CRLF, runs Core Console under a timeout, decodes the UTF-16 output into `<steps>.out.txt`, and prints it.
-- Ends with a verdict line, `RUNNER: PASS`, `RUNNER: FAIL` (with the offending lines) or `RUNNER: TIMEOUT`, and exits 0, 1 or 2 to match.
+- Appends an end marker and a discard-and-quit to your steps, writes them as a CRLF script, runs Core Console with a timeout, decodes the UTF-16 output into `<steps>.out.txt`, and prints it. At the timeout it kills Core Console and its child processes. Afterwards it deletes the temp file (`%TEMP%\accc<N>`) that Core Console leaves behind when a run doesn't end through QUIT, first adding any text in it, such as a .NET crash's error and stack trace, to the end of the output.
+- Ends with a verdict line, `RUNNER: PASS`, `RUNNER: FAIL` (with the offending lines) or `RUNNER: TIMEOUT`, and exits 0, 1 or 2 to match (`$LASTEXITCODE` after `&`). A bad argument or setting also exits 1, with a message on stderr.
 - Lines starting with `;EXPECT ` are assertions: the runner strips them from the script and fails the run unless each one's text appears in the output. Echoed script lines (`Command: ...`) don't count.
 - FAIL means one of: `Unknown command`, a LISP `; error:`, `Unable to load`, `Invalid option keyword`, an unhandled exception, `FATAL ERROR`, Core Console couldn't open the script (`Can't find file`, `Invalid file name`), the end marker never printed (the script aborted or crashed), or an `;EXPECT` text is missing.
-- Environment: `ACAD_PRODUCT` and `ACAD_PROFILE` pick the product and profile (AutoCAD Electrical: `ACAD_PRODUCT=ACADE ACAD_PROFILE='<<ACADE>>'`), `ACAD_DIR` the install folder, `RUN_TIMEOUT` the timeout in seconds (default 120).
+- Environment: `ACAD_PRODUCT` and `ACAD_PROFILE` pick the product and profile, `ACAD_DIR` the install folder, `RUN_TIMEOUT` the timeout in seconds (default 120). Set them in the same command as the call, for AutoCAD Electrical: `$env:ACAD_PRODUCT = 'ACADE'; $env:ACAD_PROFILE = '<<ACADE>>'; & <skill>\scripts\run-core-console.ps1 steps.scr`. A profile passed this way stays AutoCAD's current profile afterwards (gotchas, Core Console).
+- Write steps files as UTF-8 (the Write tool's default; a BOM is fine). The runner rewrites them as UTF-8 with a BOM, which Core Console needs to read non-ASCII text (gotchas, Core Console). A file that isn't valid UTF-8 is read in the ANSI code page.
 - The drawing is never saved, though the code under test can still save it itself, so test on copies.
 - The run files (`*.run.scr`, `*.raw.txt`, `*.out.txt`) land next to the steps file; keep them out of version control.
+- Outside PowerShell (cmd, Git Bash), call `powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\run-core-console.ps1 <steps-file>`; the exit code passes through.
+- Group Policy can forbid scripts outright: if `Get-ExecutionPolicy -List` shows `Restricted` or `AllSigned` for MachinePolicy or UserPolicy, the runner can't run however it's called, so tell the user.
 
 A PASS with no `;EXPECT` lines only means nothing failed loudly. Prove the behavior: have the code print a computed result such as `MYCMD-OK count=3`, and add `;EXPECT MYCMD-OK count=3`. Build literal markers with `strcat`, so a script line swallowed as a prompt answer can't satisfy its own expectation through the echo.
 
-After changing the runner, run `scripts/selftest.sh`. It checks one passing case and three failing ones, in about 10 seconds.
+After changing the runner, run `scripts/selftest.ps1` the same way. It checks one passing case, three failing ones, a prompt left waiting (TIMEOUT) and a non-ASCII round trip, and that no run leaves a temp file behind, in about 15 seconds.
 
 ## Steps files
 
@@ -112,3 +117,4 @@ The answers, in order: detailed configuration, layout, device, paper size, lands
 
 - `Drawing created using acad.dwt from AutoCAD profile: <<NAME>>` shows which profile the run used.
 - `**** System Variable Changed ****` and `LogFilePath has been set to the working folder.` are normal startup noise.
+- A `MessageBox` block is a dialog Core Console answered by itself (`>>>Responding: OK.`). A missing drawing shows up this way, as `Cannot find the specified drawing file.`, and then the script never runs.

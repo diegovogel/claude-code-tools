@@ -4,28 +4,32 @@ Lessons learned building and testing AutoCAD .NET extensions. Read the headers, 
 
 ## Workflow rules
 
-- Judge every Core Console run by its output, never its exit code: accoreconsole exits 0 even after `Unknown command` or a failed NETLOAD. `scripts/run-core-console.sh` does this for you. _Discovered: 2026-10-28_
+- Judge every Core Console run by its output, never its exit code: accoreconsole exits 0 even after `Unknown command` or a failed NETLOAD. `scripts/run-core-console.ps1` does this for you. _Discovered: 2026-10-28_
 - Before an experiment, decide the one thing it should prove and have it print a marker for that. A run with no marker proves only that nothing crashed. _Discovered: 2026-10-28_
 
 ## Core Console
 
-### Hangs forever when run from Git Bash
+### Hangs forever when called from Git Bash
 
-**Symptom:** accoreconsole prints its usage text, then waits for input until it's killed.
+**Symptom:** accoreconsole called by hand from Git Bash prints its usage text, then waits for input until it's killed.
 **Cause:** Git Bash (MSYS) rewrites arguments that start with `/` (`/s`, `/i`, `/p`) into POSIX paths, so Core Console sees no valid switches and drops into interactive mode.
-**Fix:** prefix the call with `MSYS_NO_PATHCONV=1`, and always run it under `timeout`. The same goes for any Windows tool with `/` switches, such as tf.exe and reg.exe. _Discovered: 2026-10-28_
+**Fix:** use the runner (PowerShell rewrites nothing). To call accoreconsole from Git Bash anyway, prefix the call with `MSYS_NO_PATHCONV=1` and run it under `timeout`. The same goes for any Windows tool with `/` switches, such as tf.exe and reg.exe. _Discovered: 2026-10-28_
 
-- Output is UTF-16LE. `tr -d '\000'` makes it greppable for ASCII; decode properly if you need non-ASCII text. _Discovered: 2026-10-28_
+- Output is UTF-16LE with no BOM, whether it goes to a file or a pipe. Decode it as UTF-16LE (the runner does): stripping the NUL bytes keeps only ASCII intact. _Discovered: 2026-10-28_
 - The `/s` script path must be absolute. A relative path prints `"x.scr": Can't find file.`, runs nothing, and still exits 0. _Discovered: 2026-10-28_
-- Long script paths fail too: a 290-character path gave `Invalid file name` (even with the `\\?\` prefix Core Console adds), while about 200 characters worked. Keep QA folders shallow. _Discovered: 2026-10-28_
+- Long script paths fail too: a 290-character path gave `Invalid file name` (even with the `\\?\` prefix Core Console adds), while about 200 characters worked. Windows PowerShell 5.1 can't open paths that long at all, so the runner reports `Cannot find path ... because it does not exist` for a steps file that's there. Claude's session scratchpad can be that deep, so keep QA folders shallow, such as `%TEMP%\<name>`. _Discovered: 2026-10-28_
 - `(getcname "MYCMD")` returns nil for an unregistered command and works for .NET commands, so it checks that NETLOAD registered a command without running it (verified against LINE and a made-up name). _Discovered: 2026-10-28_
 - An unknown command (or any script error) aborts the rest of the script, so later lines never run. A missing end marker is how you notice. _Discovered: 2026-10-28_
 - QUIT on a modified drawing asks `Really want to discard all changes to drawing? <N>`. Answer `_Y`, or the run hangs. _Discovered: 2026-10-28_
+- With stdin at end of file (`NUL`, or as Claude Code's Bash and PowerShell tools run commands), a prompt doesn't wait for input: it reads U+FFFF characters, and a `getpoint` went on to `; error: Exception occurred: 0xC0000005 (Access Violation)` and exit code 0. Given an open stdin that sends nothing, it waits until killed; the runner sets that up, so a prompt left waiting always ends in TIMEOUT. _Discovered: 2026-10-29_
 - Without `/p`, Core Console uses AutoCAD's current profile; the startup line `Drawing created using acad.dwt from AutoCAD profile: <<...>>` says which. `/product ACADE /p "<<ACADE>>"` works for AutoCAD Electrical. _Discovered: 2026-10-28_
+- `/p` doesn't only pick the profile for that run: it makes it AutoCAD's current profile, which later runs without `/p` use too, as does full AutoCAD started without one. One test run with `/p <<VANILLA>>` left later runs on a profile with no trusted locations, so NETLOAD failed with `Unable to load`. One run with the original profile switches it back (verified both ways). _Discovered: 2026-10-29_
 - `(layoutlist)` is undefined in Core Console (`; error: no function definition: LAYOUTLIST`), like the other ActiveX-era Visual LISP helpers. Read paper space size from `LIMMAX` instead, or list layouts from .NET. _Discovered: 2026-10-29_
 - `(princ "x")` prints x and then the echo of its return value. End probe lines with `(princ)` for clean output. _Discovered: 2026-10-28_
 - Script files run with either CRLF or LF line endings (both verified), so there's no need to convert by hand. _Discovered: 2026-10-28_
-- A Core Console crash leaves no trace in its output: the text just stops, and the runner reports `script never reached its end marker`. The Windows Application event log has the details: `.NET Runtime` event 1026 with the exception and `Application Error` event 1000 with the faulting module. In PowerShell: `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} | Where-Object Message -match accoreconsole`. _Discovered: 2026-10-28_
+- Core Console reads a script without a BOM in the ANSI code page, so UTF-8 text such as `°` arrives as `Â°`. UTF-8 with a BOM and UTF-16LE with a BOM both work (verified with `°Ø€Ω`); the runner writes UTF-8 with a BOM. _Discovered: 2026-10-29_
+- Every run starts by naming a temp file, `Redirect stdout (file: %TEMP%\accc<N>)`. Core Console deletes it only when the run ends through QUIT, so aborted, crashed and killed runs leave it behind, usually empty, and those pile up in `%TEMP%`. The runner deletes it after every run. _Discovered: 2026-10-29_
+- A Core Console crash cuts the output short, and editor messages written just before it can be lost too (a marker written right before the fault never appeared). The .NET error and stack trace land in that temp file instead, in ANSI rather than UTF-16, and the runner adds them to the end of its output (verified with a plug-in that crashes on purpose). They match `.NET Runtime` event 1026 in the Windows Application event log. Neither names the plug-in's own method; `Application Error` event 1000 adds the faulting module. In PowerShell: `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} | Where-Object Message -match accoreconsole`. Where Windows Error Reporting's `LocalDumps` key exists, each crash also leaves a minidump of about 20 MB in `%LOCALAPPDATA%\CrashDumps`, which Windows caps at 10 files by default. _Discovered: 2026-10-28_
 
 ## Load security (SECURELOAD, trusted locations)
 
