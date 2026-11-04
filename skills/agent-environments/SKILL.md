@@ -361,6 +361,9 @@ step 7 still carries the full record.
    run it whenever anything remotely security-relevant was touched (auth, input
    handling, network calls, file I/O, crypto, headers, middleware, rate limiting).
    Skip only for plainly non-security diffs (pure CSS, a variable rename, docs).
+   Its report reads like a final message, but it isn't one: print it, then go
+   straight on to step 4 in the same turn. This step is where the workflow has
+   most often stalled.
 4. **`/manual-qa`** — exercise the change end-to-end. Default: **drive it
    yourself headlessly** — start the env's `serve` and hit it with `curl` for
    HTTP/back-end changes, or write *temporary* Playwright tests for UI (run

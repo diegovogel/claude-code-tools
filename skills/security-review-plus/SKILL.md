@@ -83,6 +83,8 @@ Reporting rules for Phase 3:
 
 The review's output is a single markdown report: no preamble, no trailing summary, just the findings.
 
+When this runs as one step of a larger workflow (the agent-environments pre-PR workflow, or any sequence the user asked to run through), the report is not the end of the turn: print it, then go straight on to the workflow's next step in the same turn. Ending the turn on the report stalls the workflow until the user notices.
+
 Structure:
 
 ```markdown
