@@ -328,6 +328,31 @@ project_pre_destroy() {
   `npx vite --port="$vite_port" --host 127.0.0.1` (as above). Hit converting
   an app on 2026-09-18: its config used `npm run dev` and the guard was added
   to `package.json` in the same conversion.
+- **Give PHPStan a cache per checkout.** Its default `tmpDir` is the system
+  temp folder, shared by the main checkout and every env, and its reflection
+  cache stores absolute paths into `vendor/` (e.g. a `phpstorm-stubs` file inside
+  `vendor/phpstan/phpstan/phpstan.phar`). After an env was destroyed, PHPStan in
+  a new env failed with `Internal error: "phar:///…/.claude/worktrees/<deleted
+  env>/vendor/phpstan/phpstan/phpstan.phar/…/standard_10.stub" is not a file`.
+  `phpstan clear-result-cache` doesn't help: it clears only the result cache.
+  At setup, add to the project's PHPStan config (path relative to the config
+  file; Laravel's `storage/framework/cache/.gitignore` already ignores it, and
+  the engine doesn't clone it):
+
+  ```neon
+  parameters:
+      # Inside the checkout, not the shared system temp folder: PHPStan caches
+      # absolute paths into vendor/, so removing an agent env (a worktree) would
+      # otherwise break PHPStan in every other checkout.
+      tmpDir: storage/framework/cache/phpstan
+  ```
+
+  To unblock a project that hasn't changed yet, delete only the stale entries:
+  `grep -rl "worktrees/<deleted env>/" "$(php -r 'echo sys_get_temp_dir();')/phpstan/cache" | xargs rm -f`.
+  Hit on 2026-11-04. Three attempts to reproduce it on
+  demand (destroying an env that had just run PHPStan, including on new code)
+  all passed, so the exact trigger is unknown. The per-checkout cache removes
+  the sharing it came from.
 - **Cached config shadows `.env`.** If `bootstrap/cache/config.php` exists (from
   `config:cache`), it overrides the env's `.env` ports/DB. `project_after_provision`
   runs `config:clear`. (A fresh worktree usually has no cached config, since

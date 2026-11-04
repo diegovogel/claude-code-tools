@@ -460,7 +460,12 @@ full non-Node fill-in see [`references/laravel.md`](references/laravel.md)):
    work. Many stacks need it; the Node example needs none.
 6. **Stateful teardown**: what per-env state outlives the worktree and must be
    removed on destroy (a MySQL schema, a cache namespace)? File-backed state
-   (SQLite) needs nothing, it goes away with the worktree.
+   (SQLite) needs nothing, it goes away with the worktree. Also look for **tool
+   caches shared by every checkout** (outside the repo) that store absolute
+   paths into `vendor/` or `node_modules/`. Once
+   an env is destroyed, they can break that tool in every other checkout. Point
+   them inside the checkout instead, in a gitignored folder the engine doesn't
+   clone. PHPStan's default `tmpDir` is one (`references/laravel.md`, Gotchas).
 7. **Fixed-address integration**: is there one (manifest, redirect URI, webhook)?
    That decides whether takeover QA applies.
 8. **The main dev command name** (`MAIN_DEV_CMD`, named in the engine's
