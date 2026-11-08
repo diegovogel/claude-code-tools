@@ -16,6 +16,7 @@ fits any stack).
 - [The dev/serve command](#the-devserve-command)
 - [Stateful services (DB, cache, queue, search)](#stateful-services)
 - [Fixed-address takeover QA](#fixed-address-takeover-qa)
+- [Native macOS apps (Xcode): notes, not a supported flow yet](#native-macos-apps-xcode-notes-not-a-supported-flow-yet)
 - [The in-env guard](#the-in-env-guard)
 - [OS / copy-on-write notes](#os--copy-on-write-notes)
 - [Gotchas that bite](#gotchas-that-bite)
@@ -341,6 +342,63 @@ beating the config file, so no file edits are needed.
 If the project has **no** fixed-address integration, make `project_main_ports`
 echo nothing, and `--main-ports` then errors loudly instead of silently doing the
 wrong thing, and you drop the takeover bullets from the CLAUDE.md section.
+
+## Native macOS apps (Xcode): notes, not a supported flow yet
+
+Status: set up once on an App Sandboxed macOS app (an Xcode project with Swift
+Package Manager packages, 2026-11) and then removed, because work on that repo
+is sequential. Nothing here is wired into the engine. These are the facts the
+adaptation surfaced, plus a direction for when a native-app repo needs envs.
+
+What the engine can do there:
+
+- **DerivedData is already per worktree.** Xcode names a project's folder
+  `<Name>-<hash>`: the MD5 of the `.xcodeproj` path, each 8-byte half written
+  as 14 base-26 letters (`a` to `z`). So every worktree builds into its own
+  folder with no flags, and a config can compute the folder before Xcode
+  creates it. `project_pre_destroy` should delete it (GBs of build products).
+- **Seed Swift packages by CoW, not by download.** Resolved packages can run to
+  several GB. Clone the main checkout's `SourcePackages` into the env's
+  DerivedData folder, then rewrite the main folder's absolute path in the three
+  places SwiftPM records it: `workspace-state.json`, and each checkout's
+  `.git/config` (its origin URL) and `.git/objects/info/alternates`.
+  `xcodebuild -resolvePackageDependencies` then fetches nothing (`create` took
+  7 s). Xcode's compilation cache is shared across DerivedData folders, so an
+  env's first build took under a minute once the main checkout had built.
+- **No ports, no dev server.** `PORTS_PER_ENV=1` on a band nothing listens on
+  satisfies the engine. `serve` can mean "build the env's app and launch it"
+  (`open -n -g` keeps it in the background, off the user's focus) and `stop`
+  kills it. There is no dev command to guard.
+- **Nested worktrees get linted.** A repo-root SwiftLint run and the SwiftLint
+  build plugin (which lints the whole project folder) both reach
+  `.claude/worktrees/`. Lint each checkout from its own root, or lint the
+  files `git ls-files` lists.
+
+What it can't do:
+
+- **App state can't be isolated per env.** An App Sandboxed app keeps settings,
+  UserDefaults and the rest of its state in one container per bundle ID
+  (`~/Library/Containers/<bundle-id>/Data`), shared by every build: the main
+  checkout's, every env's and the test hosts'. `CFFIXED_USER_HOME` redirects
+  the home folder only for unsandboxed processes, and never UserDefaults. A
+  per-env bundle ID would isolate it but breaks the rule that an app
+  extension's ID starts with its app's, so it wasn't tried. Two envs running
+  the app or its UI tests at once share and overwrite each other's state.
+- **UI tests are machine-wide.** XCUITest drives the real mouse and keyboard,
+  needs macOS Automation Mode (the user authenticates), and needs an awake,
+  unlocked screen (`caffeinate -d`; on a locked screen every test fails with
+  "Failed to activate application"). Only one UI-test run at a time.
+
+Direction, not decided: handle manual QA and UI tests the way fixed-address
+takeover QA works. Build and run unit tests in the env, do QA and UI tests from
+the main checkout, then go back to the env to finish (the same build-in-env,
+QA-in-main loop a sideloaded add-in needs). Unlike an add-in, an agent can run
+this QA itself (temporary XCUITests, computer-use screenshots of the app), so
+nothing hands off to the user; it just runs from the main checkout and never
+two at once. Strictly, the binding constraint is serialization rather than
+location, since state is shared whichever checkout launches the app, so QA
+from the env's own build behind a machine-wide lock is the alternative to weigh
+when this gets built.
 
 ## The in-env guard
 
