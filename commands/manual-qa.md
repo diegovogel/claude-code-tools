@@ -6,7 +6,7 @@ Decline only when the change has no interface at all, meaning nothing in the dif
 
 How to detect: scan the diff for interface-touching files and classify each surface it touches.
 
-- **GUI**: templates, components (JSX/TSX/Vue/Svelte/Blade/Livewire), HTML, layouts, route handlers that render, CSS that affects user-visible behavior.
+- **GUI**: templates, components (JSX/TSX/Vue/Svelte/Blade/Livewire), HTML, layouts, route handlers that render, CSS that affects user-visible behavior. In native iOS/iPadOS and macOS apps: SwiftUI views, UIKit/AppKit views and view controllers, gesture and touch handling, drawing/rendering code, asset catalogs.
 - **API**: route/controller/handler definitions, request validation, serializers, OpenAPI or GraphQL schemas, webhooks, auth middleware.
 - **CLI**: command definitions, argument parsers, `bin/` entries, console kernels, scripts meant to be run by hand.
 - **Other user-facing output**: emails, notifications, exports and generated files, jobs a user triggers and sees the result of.
@@ -129,6 +129,7 @@ You drive, headlessly, by default:
 - **API**: you, with curl or the project's own client, from inside the env.
 - **CLI**: you, via Bash from inside the env, using the entry point Phase 0 settled on.
 - **GUI**: you, with a throwaway Playwright script when a headless browser is installed (keep it in the env's gitignored tmp/ or the scratchpad, never commit it). Prefer the script over the Browser pane or Claude-in-Chrome for a full pass; they're too slow for many Steps, though fine for a single visual check.
+- **iOS/iPadOS GUI**: you, on the checkout's own simulator (the project's CLAUDE.md says how to resolve its UDID; in an agent env it is the env's device, never the main checkout's). The iOS Simulator tool (screenshot, tap, swipe, type) for a few visual checks; temporary XCUITests for a full pass, which are much faster than screenshot-and-tap. Temporary UI test files sit inside the test target's folder, so delete them in Phase 5 before anything is committed. What a simulator cannot show (real finger feel, the camera, sensors, real performance) becomes a user-driven Step on the device.
 
 Hand a Step to the user only when it cannot be done headlessly: the surface renders inside a host app (an Outlook add-in, an IDE, a mobile shell) or needs a real device, or it needs their terminal, session or credentials you must not handle. A project CLAUDE.md or the user can also pin a surface as user-driven. Mixed procedures are normal: label each Step with whoever drives it.
 

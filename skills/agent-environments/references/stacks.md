@@ -16,7 +16,7 @@ fits any stack).
 - [The dev/serve command](#the-devserve-command)
 - [Stateful services (DB, cache, queue, search)](#stateful-services)
 - [Fixed-address takeover QA](#fixed-address-takeover-qa)
-- [Native macOS apps (Xcode): notes, not a supported flow yet](#native-macos-apps-xcode-notes-not-a-supported-flow-yet)
+- [Native macOS apps (Xcode): notes, not a supported flow yet](#native-macos-apps-xcode-notes-not-a-supported-flow-yet); iOS/iPadOS apps are supported (a simulator per env)
 - [The in-env guard](#the-in-env-guard)
 - [OS / copy-on-write notes](#os--copy-on-write-notes)
 - [Gotchas that bite](#gotchas-that-bite)
@@ -399,6 +399,56 @@ two at once. Strictly, the binding constraint is serialization rather than
 location, since state is shared whichever checkout launches the app, so QA
 from the env's own build behind a machine-wide lock is the alternative to weigh
 when this gets built.
+
+### iOS / iPadOS apps: a supported flow (validated 2026-11)
+
+An iOS app runs in the Simulator, and a simulator device keeps the app's whole
+state (container, UserDefaults, Photos) to itself, so the per-env isolation a
+macOS app lacks comes for free: **one simulator per env**. Validated on a
+SwiftUI iPad app with no Swift packages: create took under a second, the full
+suite (Swift Testing unit tests plus XCUITests) ran in an env and in the main
+checkout *at the same time*, `serve` launched the env's build, and `destroy`
+removed the device, the default-location DerivedData and the branch.
+
+- **The repo's scripts own the simulator, the config only names it.**
+  `project_env_port_lines` writes `SIMULATOR_NAME=<repo>-<env>` into the env's
+  `.env` (gitignored). A repo script (e.g. `scripts/simulator.sh`) prints the
+  checkout's device UDID, reading that line in an env and defaulting to a fixed
+  device (the target hardware) in the main checkout, and creates the device with
+  `xcrun simctl create <name> <device-type> <runtime>` when it is missing. Every
+  build/test/run script resolves its destination through it
+  (`-destination id=<udid>`), so the same commands are correct in any checkout
+  and an agent points the iOS Simulator tool at that UDID.
+  `project_after_provision` calls it once so the first test run doesn't pay
+  for creation. Prefer `create` over `simctl clone`: clone needs the source
+  shut down and copies its app state.
+- **Build into the checkout**: `-derivedDataPath <checkout>/.build/DerivedData`
+  (gitignored) in every script, so build products leave with the worktree. Xcode
+  itself, and tools that build through it, still use the default location;
+  `project_pre_destroy` deletes any `DerivedData/<Name>-*` folder whose
+  `info.plist` `WorkspacePath` lies under the env (read it with
+  `/usr/libexec/PlistBuddy -c 'Print :WorkspacePath'`), rather than recomputing
+  the hash.
+- **`project_pre_destroy` deletes the device**: `simctl shutdown` first,
+  because `simctl delete` refuses a booted device.
+- **`serve` = build, install, launch, stream the log.** `project_start_servers`
+  runs the repo's run script (`simctl boot`, `bootstatus -b`, `install`,
+  `launch --terminate-running-process`), then backgrounds `xcrun simctl spawn
+  <udid> log stream --predicate 'process == "<App>"'` into `logs/app.log` with
+  a PID file, so `stop` ends the stream (the device stays booted). No health
+  URLs. `PORTS_PER_ENV=1`, `PORT_STRIDE=1` on a band nothing binds.
+- **Simulator UI tests are not machine-wide.** Unlike macOS XCUITest, they
+  drive the simulator, not the real mouse and keyboard: no Automation Mode
+  prompt, and two envs ran UI tests concurrently on their own devices. Pass
+  `-parallel-testing-enabled NO` so xcodebuild doesn't clone extra devices.
+  RAM is the limit: roughly 1-2 GB per booted simulator.
+- **Hand-written project files**: with folder-synchronized groups
+  (`PBXFileSystemSynchronizedRootGroup`, `objectVersion = 77`), a project file
+  has no per-file entries, so parallel branches adding files never conflict in
+  `project.pbxproj`.
+- **What an env cannot cover**: the real device (finger feel, camera, sensors,
+  performance) and installing onto it (`xcrun devicectl device install app`);
+  those run from the main checkout after merge.
 
 ## The in-env guard
 
