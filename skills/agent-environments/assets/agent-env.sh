@@ -374,8 +374,12 @@ EOF
   project_after_provision "$env" "$name" "$slot"
 
   # Ensure the main checkout has the lockfile-reconcile git hooks (idempotent,
-  # quiet). Best-effort: a hook-install hiccup must never fail provisioning.
-  cmd_install_hooks --quiet || warn "could not install dependency-sync git hooks"
+  # quiet). Best-effort: a hook-install hiccup must never fail provisioning. A
+  # project with no LOCKFILES has nothing to reconcile, so it gets no hooks (and
+  # keeps its own core.hooksPath).
+  if [[ -n "${LOCKFILES// /}" ]]; then
+    cmd_install_hooks --quiet || warn "could not install dependency-sync git hooks"
+  fi
 
   say "provisioned '$name' (slot $slot)"
   say "  path:   $env"
