@@ -10,6 +10,8 @@
 # Doesn't use GitHub auto-merge: some repos can't turn it on, and a repo with no
 # required checks would merge at once, before CI. Instead it polls the PR itself:
 #
+#   0. Stops at once (exit 5) when GitHub reports merge conflicts: it starts no
+#      pull_request CI on a conflicting PR, so there would be nothing to wait for.
 #   1. Waits until everything CI runs on the PR's head commit has finished and
 #      passed: the check runs and statuses GitHub reports, and every GitHub
 #      Actions workflow run. The runs matter twice over: a job waiting on another
@@ -265,6 +267,11 @@ poll() {
   # The last merge attempt failed and this read shows it didn't go through.
   [[ "$merge_exhausted" == false ]] || ew_die 5 "gh pr merge refused $url $merge_attempts times (see above)"
   [[ "$draft" != true ]] || ew_die 5 "$url is a draft; mark it ready for review first"
+  # Before looking at checks: GitHub starts no pull_request CI on a PR that
+  # conflicts with its base, so waiting would end in a misleading exit 4.
+  case "$mergeable/$merge_state" in
+    CONFLICTING/* | */DIRTY) ew_die 5 "$url has merge conflicts with $base" ;;
+  esac
 
   # A new head commit (a push, or our own branch update) gets its own wait for
   # checks to appear.
@@ -314,7 +321,6 @@ poll() {
 
   [[ "$merge_state" == BLOCKED ]] && blocked_polls=$((blocked_polls + 1)) || blocked_polls=0
   case "$mergeable/$merge_state" in
-    CONFLICTING/* | */DIRTY) ew_die 5 "$url has merge conflicts with $base" ;;
     */BEHIND)
       ((updates < MAX_BRANCH_UPDATES)) || ew_die 5 "$url is still behind $base after $updates update attempts"
       updates=$((updates + 1))
