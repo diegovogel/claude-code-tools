@@ -4,13 +4,13 @@ Run the current branch through automated Codex review cycles until Codex has not
 
 Verify the working tree is in a shape we can review, then proceed to Phase 2. If any check fails, STOP and report — do NOT proceed to Phase 2.
 
-**Committing is pre-authorized here; don't stall waiting for permission.** This skill reviews the *branch diff* (Phase 2 passes `--scope branch --base main`), so committing isn't a side effect of the review, it's a precondition for the review seeing anything at all. Where the steps below say to commit, just do it. The "otherwise ask" branches below still apply, but they're about *which* changes belong in the commit, not about whether you may commit at all.
+**Committing is pre-authorized here; don't stall waiting for permission.** This skill reviews the *branch diff* (Phase 2 passes `--scope branch --base origin/main`), so committing isn't a side effect of the review, it's a precondition for the review seeing anything at all. Where the steps below say to commit, just do it. The "otherwise ask" branches below still apply, but they're about *which* changes belong in the commit, not about whether you may commit at all.
 
 1. **On a branch**, not `main`.
    - If on a feature branch, continue to (2).
    - If on `main` AND there are uncommitted changes (tracked or untracked) that look related to the work just done in this conversation: propose a short kebab-case branch name based on the work, confirm it and the intended commit message with the user in a single question, then `git checkout -b <name>` and stage/commit the related files per your system prompt's commit workflow. Proceed once the branch exists with the commit on it.
    - If on `main` with no uncommitted changes (or no related ones): stop and ask the user what branch they want to review.
-2. **Changes exist vs `main`**. Run `git diff --shortstat main...HEAD`. If empty, stop and tell the user there's nothing to review.
+2. **Changes exist vs `origin/main`**. Run `git fetch origin main`, then `git diff --shortstat origin/main...HEAD`. If empty, stop and tell the user there's nothing to review. The base is `origin/main`, not local `main`, because local `main` is often stale (nobody pulls it while working on branches), and a stale base drags already-merged commits into the review. Fetch once here, not per cycle, so the base doesn't move mid-loop.
 3. **Working tree is clean (no uncommitted changes).** If there are modifications remaining after step 1:
    - If the changes look related to the work being reviewed, draft and create a commit per your system prompt's commit workflow. Do this before starting cycles.
    - If you're not confident the changes belong with the branch's work, STOP and ask the user what to do with them. Suggest they stash or revert, but let them decide.
@@ -33,14 +33,14 @@ ls -t ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs |
 Then launch the review with that path written out literally, with `run_in_background: true` (or foreground if the user passed `--wait` to `/review-with-codex`):
 
 ```bash
-node /Users/diego/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs review --scope branch --base main
+node /Users/diego/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs review --scope branch --base origin/main
 ```
 
 Two calls rather than one `node "$(ls -t ...)"`, because the pre-PR workflow runs this from inside a worktree the session entered with `EnterWorktree`, and the runtime's Bash vetting there refuses command substitution outright. Sessions were quietly typing the path by hand to get past it; a plain pipe and a literal path both pass.
 
 **Effort and model.** Every cycle runs on what `~/.codex/config.toml` pins: Sol (`gpt-5.6-sol`) at high effort. Don't pass `--model`, and don't change the effort between cycles. Replays of past branches at the exact commits reviewed showed why: Astra at medium caught half of what Sol/high's first pass found and Terra at high a third, and both came back clean on branches with real bugs. A per-cycle effort switch was tried and dropped as too fragile.
 
-**Always pass `--scope branch --base main` explicitly.** Without those flags the reviewer defaults to `--scope auto`, which picks up the working-tree diff first and will review only your uncommitted changes (typically unrelated ambient-tool churn) instead of the branch commits we came here to review. This produces a confident "no findings" on the wrong diff and has bitten this skill multiple times. If the branch is based on something other than `main`, substitute the right base — but set it explicitly, don't trust the default.
+**Always pass `--scope branch --base origin/main` explicitly.** Without those flags the reviewer defaults to `--scope auto`, which picks up the working-tree diff first and will review only your uncommitted changes (typically unrelated ambient-tool churn) instead of the branch commits we came here to review. This produces a confident "no findings" on the wrong diff and has bitten this skill multiple times. If the branch is based on something other than `main`, substitute the right base (its `origin/` ref, fetched first), but set it explicitly, don't trust the default.
 
 **Why this and not `Skill({ skill: "codex:review" })`?** The `/codex:review` skill has `disable-model-invocation: true` in its frontmatter, which the Skill tool enforces — it returns an error instead of running. Direct Bash invocation is the working alternative. If that flag is ever removed from `/codex:review`, prefer the Skill tool because it resolves `${CLAUDE_PLUGIN_ROOT}` correctly and auto-inherits future changes to the upstream skill — but still make sure the branch scope is set explicitly.
 

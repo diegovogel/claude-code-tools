@@ -17,11 +17,11 @@ The review targets a checkout, not the session. Default `<target>` to the sessio
 Resolve `<base>` and confirm there is something to review:
 
 ```
-git -C <target> diff --shortstat origin/HEAD...
-git -C <target> diff --shortstat main...HEAD
+git -C <target> fetch origin
+git -C <target> rev-parse --verify --quiet origin/HEAD
 ```
 
-`<base>` is `origin/HEAD` if the first command succeeds with a non-empty stat, otherwise `main`. If BOTH are empty or fail, **abort the entire review with an error** naming `<target>` and its current branch (`git -C <target> branch --show-current`). Do not run any phase and do not output "No findings." An empty diff at review time almost always means the wrong checkout (typically the session sitting in the main checkout while the branch lives in a worktree), and a clean report over zero reviewed lines reads as a clean bill of health. If the work lives in an agent-env worktree, rerun with that worktree as `<target>`.
+`<base>` is `origin/HEAD` if the `rev-parse` prints a hash, otherwise `origin/main` (some clones never set `origin/HEAD`). Never fall back to local `main`: it is often stale, and a stale base drags already-merged commits into the review. Then run `git -C <target> diff --shortstat <base>...HEAD`. If it is empty or fails, **abort the entire review with an error** naming `<target>` and its current branch (`git -C <target> branch --show-current`). Do not run any phase and do not output "No findings." An empty diff at review time almost always means the wrong checkout (typically the session sitting in the main checkout while the branch lives in a worktree), and a clean report over zero reviewed lines reads as a clean bill of health. If the work lives in an agent-env worktree, rerun with that worktree as `<target>`.
 
 ## Step 3: Phase 1, delegate to a subagent
 

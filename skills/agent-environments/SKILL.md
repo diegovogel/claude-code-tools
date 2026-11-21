@@ -288,8 +288,8 @@ shared, and each has a rule:
 | The repo root | `git clean -fdx` there deletes every env (cardinal rule above). |
 
 What does **not** change: the pre-PR workflow is branch-scoped, so
-`/review-with-codex --scope branch --base main` stays correct no matter what the
-main checkout has checked out (`main` is a ref, not a checkout). Nor does the
+`/review-with-codex --scope branch --base origin/main` stays correct no matter what the
+main checkout has checked out (`origin/main` is a ref, not a checkout). Nor does the
 `destroy` guard, with one consequence worth knowing: it counts commits reachable
 only from the env branch across **all** local branches and remotes, so once the
 person merges an env branch into theirs, that env's commits are no longer unique
