@@ -63,6 +63,23 @@ Lessons learned building and testing AutoCAD .NET extensions. Read the headers, 
 - NUnit runs tests on a worker thread of its own unless told otherwise, and AutoCAD's API isn't safe there. Pass NUnitLite's `--mainthread` (present in 5.0.0). Verified: with it, tests ran on the command's thread; without it, on another one. _Discovered: 2026-10-28_
 - An NUnitLite run whose `--where` filter matches nothing exits 0 (result Inconclusive, 0 tests). Judge the run by the `total` and `failed` attributes of the `--result` XML's root, not by the exit code alone. _Discovered: 2026-10-28_
 
+### Saving a never-saved drawing writes Drawing1.dwg into the startup folder
+
+**Symptom:** a `Database.SaveAs(doc.Name, ...)` meant to "save the open drawing" silently creates `Drawing1.dwg` in an unexpected folder, overwriting any file of that name, and the document is then named there. In a feature test run from a source folder, the file landed in the source tree.
+**Cause:** an unsaved drawing's `doc.Name` is just `Drawing1.dwg`, and AutoCAD resolves it against `DWGPREFIX`, the folder AutoCAD or Core Console started in. Changing .NET's `Environment.CurrentDirectory` doesn't move it (verified). `HostApplicationServices.FindFile(doc.Name, ...)` throws `eFilerError` for the same drawing.
+**Fix:** check `Document.IsNamedDrawing` before saving or looking up the drawing's file (`DWGTITLED` is the system variable). Start Core Console in a disposable folder (the process's working directory), so a test that saves the startup drawing can't write into your repo; a drawing AutoCAD has open can't be deleted by the test afterwards. _Discovered: 2026-11-12_
+
+## Dialogs (WinForms)
+
+- A WinForms dialog can be constructed and laid out in Core Console without being shown (`_ = form.Handle; form.PerformLayout();`), so its layout can be feature tested. Core Console reports 96 DPI, so a bug that only shows above 100% scaling can pass there. _Discovered: 2026-11-12_
+- A form with `ControlBox = false` and a `Text` set after `ClientSize` (designer order) is sized with no title bar, then gains one without growing, so its bottom row is clipped: exactly flush at 96 DPI, 10 px short at 120. `AutoSize = true` with bottom/right `Padding` fixes it. It also resists a smaller `Size`, `Bounds` or Win32 `SetWindowPos` (though not the `ClientSize` setter, so test with `Size`). AutoCAD saves each `ShowModalDialog(form)` dialog's bounds per profile under `Profiles\<profile>\Dialogs\<form type>`, in 96-DPI units (542 x 303 for a 677 x 379 window at 125%). _Discovered: 2026-11-12_
+
+### Labels drawn over buttons and text boxes above 100% scaling (.NET 8)
+
+**Symptom:** in a dialog that looks fine at 100%, at 125% buttons show only a sliver and text boxes lose the start of their text ("IMINARY" for "PRELIMINARY"). The controls aren't clipped by the form edge; the labels beside them paint over them.
+**Cause:** a .NET 8 WinForms bug. With `AutoScaleMode.Font`, a designer-written form that sets its `Font` after adding its controls (the designer's order) scales every `Label` twice: 1.78× at 125%, against 1.33× for buttons, text boxes and positions (measured with a minimal form). The labels then reach into the next control, and the designer's `Controls.Add` order puts them on top. .NET 10 (AutoCAD 2027) scales them once.
+**Fix:** `AutoScaleDimensions = new SizeF(96F, 96F)` with `AutoScaleMode = AutoScaleMode.Dpi`. Every control then scales by 1.25 at 125%, and 100% is unchanged. Every designer form in the extension has the same shape, so check them all, not just the one reported: a label over the next control's left edge is easy to miss. Core Console and test hosts run at 96 DPI, so no automated test sees this. Check by rendering the form in a small system-DPI-aware exe (`Application.SetHighDpiMode(HighDpiMode.SystemAware)`, like `acad.exe`) and reading control bounds or a `CopyFromScreen` capture. _Discovered: 2026-11-12_
+
 ## Loading and reloading
 
 - .NET assemblies can't be unloaded from AutoCAD, so picking up a new build means restarting it (Core Console restarts on every run anyway). Full AutoCAD also locks the DLL it loaded, so stage each build into a new folder. _Discovered: 2026-10-28_
@@ -71,8 +88,16 @@ Lessons learned building and testing AutoCAD .NET extensions. Read the headers, 
 
 - Headless PNG output works with the `PublishToWeb PNG.pc3` device and the `XGA (1024.00 x 768.00 Pixels)` paper size. The full `-PLOT` answer sequence is in `headless-testing.md`. _Discovered: 2026-10-28_
 - A .NET multi-sheet plot (`PlotFactory.CreatePublishEngine` with a `PlotProgressDialog`, the pattern of the widely copied multi-sheet sample) crashed Core Console with `AccessViolationException` right after it switched layouts. Whether the dialog or the engine is to blame is untested; `-PLOT` from a script works. _Discovered: 2026-10-28_
-- To look at a plotted PDF on a machine without PDF tools, render it from PowerShell 5.1 with Windows' built-in `Windows.Data.Pdf.PdfDocument` (load the WinRT types, await `LoadFromFileAsync`, then `GetPage(0).RenderToStreamAsync` into an `InMemoryRandomAccessStream`; `PdfPageRenderOptions.SourceRect` crops a region). `PdfPage.Size` is in 1/96-inch units, not points: a 42 x 30 inch sheet reports 4032 x 2880. _Discovered: 2026-10-29_
+- To look at a plotted PDF, render a page with `scripts/render-pdf.ps1`, which uses Windows' built-in `Windows.Data.Pdf` and needs nothing installed; render wide and crop with System.Drawing to read small text. `PdfPage.Size` is in 1/96-inch units, not points: a 42 x 30 inch sheet reports 4032 x 2880. The pdf-viewer plugin and desktop extension can't open local files on Windows (every path is "not in allowed list"; modelcontextprotocol/ext-apps#644 and #816, unfixed as of 2026-11-05), so don't spend time configuring them. _Discovered: 2026-10-29, updated 2026-11-05_
 - Before QA of a command that plots, check where every configured device and output path goes. A plotter queue on a mapped drive looks just like a folder, and a QA plot sent there prints for real. _Discovered: 2026-10-29_
+### Back-to-back sheets from a .NET plot loop are silently skipped
+
+**Symptom:** a command that plots several layouts one after another (each with its own `PlotFactory.CreatePublishEngine` job) produces only the first PDF. No error, and the Plot and Publish Details show one job with one sheet.
+**Cause:** with `BACKGROUNDPLOT` at 2, AutoCAD's default, publish jobs finish in the background, and code that only plots while `PlotFactory.ProcessPlotState == NotPlotting` (a common pattern) skips every sheet that comes up while the previous job is still running.
+**Fix:** run the loop with `BACKGROUNDPLOT` set to 0 and restore it afterwards (verified: the same run then plotted every layout). Leave the dev machine at 2 so QA reproduces what users get. _Discovered: 2026-11-11_
+
+- `BACKGROUNDPLOT` is an `Int16` that `Application.SetSystemVariable` sets and restores from a command (verified in Core Console). It's saved with the user's settings, not the drawing, so restore it in a `finally` (or a disposable scope), including in tests. _Discovered: 2026-11-12_
+
 - `PlotSettingsValidator.GetPlotDeviceList()` lists `None`, then the machine's Windows printers, then the PC3 devices, so a device's number differs between machines. Never hard-code a device number in a shared test. _Discovered: 2026-10-28_
 
 ## Source control (TFVC)

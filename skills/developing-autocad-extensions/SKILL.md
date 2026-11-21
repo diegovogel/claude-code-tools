@@ -19,7 +19,7 @@ An AutoCAD extension is a .NET assembly loaded into AutoCAD's process. The fast 
 3. **Check official docs first, and again after the first failure.** The AutoCAD .NET Developer's Guide and the managed API reference beat forum posts. If the docs don't settle it on the first try, stop guessing and prove the mechanism headlessly (rule 4).
 4. **Verify in small increments, headless first.** Use the ladder below. Each new mechanism gets its own minimal probe and its own Core Console run before it's combined with anything else. A passing run licenses only the claim it actually tested.
 5. **Never switch off load security.** Don't set SECURELOAD to 0, not even in a test script: it's saved in the AutoCAD profile, so it would turn security off in the user's real AutoCAD too. Stage builds into a trusted dev folder instead (`headless-testing.md`).
-6. **Hand UI checks to the user, but keep the verification yours.** No computer control. When something can only be seen in full AutoCAD, give the user a short QA step (format below) and check the evidence they report.
+6. **Hand only the UI to the user, and keep the verification yours.** No computer control: you never click or type in AutoCAD. Everything before that is yours, including the terminal work: build, stage, and launch full AutoCAD on a test drawing with the build already loaded (`headless-testing.md`, Launching full AutoCAD). Then give the user a short QA step (format below) and check the evidence they report. If AutoCAD is already running, ask the user to close it; never close it yourself, since it may hold unsaved work.
 7. **Self-improve mid-session.** When you learn something that meets the bar below, add it to `gotchas.md` right away and tell the user in one line ("Added a gotcha: ..."). Don't save it up for the end.
 
 ## Verification ladder
@@ -30,7 +30,7 @@ An AutoCAD extension is a .NET assembly loaded into AutoCAD's process. The fast 
 | Unit tests | Pure logic | A plain test project. Keep AutoCAD types out of the code under test; they only work inside AutoCAD. |
 | In-process tests | Code that needs a live drawing database | NUnit tests run by NUnitLite inside Core Console (`headless-testing.md`, In-process tests) |
 | Scripted QA | A command end to end on a real drawing | `scripts/run-core-console.ps1` with a steps file; check printed markers, dumped entities or a plotted PNG |
-| User QA | Dialogs, palettes, ribbon, anything that needs the full UI | The user drives full AutoCAD; you write the steps and check their report |
+| User QA | Dialogs, palettes, ribbon, anything that needs the full UI | You launch full AutoCAD with the build loaded; the user drives the UI, and you write the steps and check their report |
 
 Climb only as high as the change needs, but don't skip a rung the change touches. Say plainly when something wasn't verified.
 
@@ -59,8 +59,9 @@ Format: a one-line tip, or **Symptom / Cause / Fix** for anything that took real
 ## Files
 
 - `gotchas.md`: lessons by topic. Read first.
-- `headless-testing.md`: the Core Console runner, steps files, staging builds, in-process NUnit tests, plotting to PNG.
+- `headless-testing.md`: the Core Console runner, steps files, staging builds, launching full AutoCAD for user QA, in-process NUnit tests, plotting to PNG.
 - `scripts/run-core-console.ps1`: the runner.
+- `scripts/render-pdf.ps1`: renders a PDF page to a PNG, to look at a plot.
 - `scripts/selftest.ps1`: checks that the runner still tells passing runs from failing ones. Run it after changing the runner.
 
 The headless approach draws on Autodesk's ADN-DevTech `acad-api-skill` and `coreconsolerunner` and on `Abo-Eyad/AutoCAD-AccoreConsole-headless` (all MIT), rewritten and retargeted to AutoCAD 2026.

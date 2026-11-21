@@ -59,6 +59,26 @@ AutoCAD loads assemblies only from trusted locations (SECURELOAD=1, the default)
 - Stage only your own DLL and .pdb, plus any third-party DLLs you ship. The build output may also hold dozens of copied AutoCAD DLLs (see gotchas, Building); leave those behind.
 - The user adds the trusted folder once: OPTIONS, Files tab, Trusted Locations, Add, type the path ending in `\...`, accept the "not read-only" warning, OK, then close AutoCAD so it saves. Trusted locations are per profile, so add it in the profile the tests run under. Never set it yourself through the registry.
 
+## Launching full AutoCAD for user QA
+
+For UI the user has to see, start full AutoCAD yourself with the build already loaded, so the user's first action is the command under test. Verified on AutoCAD Electrical 2026:
+
+1. Check that `acad.exe` isn't running. A running AutoCAD can't load a newer build (gotchas, Loading and reloading). If it is, ask the user to close it; never close it yourself.
+2. Stage the build into a new trusted subfolder, along with any files it reads from its own folder and a copy of the test drawing (copy it, because commands that save would otherwise change the original).
+3. Write a startup script (`.scr`) in that folder that NETLOADs the DLL and then writes a marker file once the command is registered:
+   ```
+   (command "_.NETLOAD" "C:/Users/<you>/AutoCAD-Dev/<build>/MyPlugin.dll")
+   (if (getcname "MYCMD") (progn (setq f (open "C:/Users/<you>/AutoCAD-Dev/<build>/loaded.txt" "w")) (write-line "MYCMD=found" f) (close f)))
+
+   ```
+   End it with an empty line so the last line runs.
+4. Launch with the same flags as the product's Start menu shortcut, plus the drawing and `/b <script>`:
+   ```powershell
+   Start-Process 'C:\Program Files\Autodesk\AutoCAD 2026\acad.exe' -ArgumentList '"<drawing>" /language "en-US" /product "ACADE" /p "<<ACADE>>" /b "<script>"'
+   ```
+   Drop `/product` for plain AutoCAD. `/p` also changes the current profile (gotchas, Core Console), so pass the one the user works in.
+5. Poll for the marker file, failing if `acad.exe` exits first or a few minutes pass. The marker proves the load from your side. To confirm which build loaded, list the `acad` process's modules and check the DLL's path.
+
 ## In-process tests (NUnit inside Core Console)
 
 For code that needs a live drawing database. The test DLL carries NUnit and NUnitLite; Core Console NETLOADs it next to the extension, and a command in it runs the tests. Verified with NUnit and NUnitLite 5.0.0 on AutoCAD 2026.
