@@ -22,7 +22,7 @@ common ones; check the CLAUDE.md):
 
 | Command | What it does |
 |---|---|
-| `scripts/agent-env-wp.sh create <name> [base-ref]` | CoW-clone the install, worktree(s) on `worktree-<name>`, per-env DB, URL, deps, build step, and per-worktree wp-env ports |
+| `scripts/agent-env-wp.sh create <name> [base-ref]` | CoW-clone the install, worktree(s) on `worktree-<name>`, per-env DB, URL, deps, build step, and per-worktree wp-env ports (a base branch behind its upstream is brought up to date first; see [Other notes](#other-notes)) |
 | `scripts/agent-env-wp.sh run <name> -- <cmd>` | Run a command in the env's own worktree, whatever the shell's cwd (the re-anchor fix) |
 | `scripts/agent-env-wp.sh serve <name>` | `wp server` on the env's port, background, health-checked |
 | `scripts/agent-env-wp.sh stop <name>` | Stop that server |
@@ -484,6 +484,15 @@ serves all of them.
   find the install and computes the repo's `wp-content/...` path. It also defaults
   the worktree base to the repo's current branch (WP repos are often on a feature
   branch, not `main`).
+- **A base branch behind its upstream is brought up to date before anything is
+  cloned**, exactly as in the generic engine (SKILL.md, "A base branch behind its
+  upstream doesn't reach the env"): a bounded fetch of that one branch, then a
+  fast-forward when the branch is checked out nowhere or clean, otherwise a
+  warning and the env worktree takes the upstream commit. It matters more here,
+  because the default base is a long-lived branch that others push to. Each
+  **sibling** repo's branch gets the same treatment, with one difference: a
+  sibling has its own config, so after a fast-forward its own `post-merge` hook
+  reconciles its dependencies, not this project's `project_sync_deps`.
 - **Ports come from one pool per `ENV_PARENT`** (`<ENV_PARENT>/.wp-slots/`): a slot
   is taken when the registry says so, or an existing env's `wp-config.php` declares
   its port, or a worktree's `.wp-env.override.json` does (a wp-env slot), so repos

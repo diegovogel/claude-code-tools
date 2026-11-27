@@ -182,6 +182,91 @@ require_not_main() {
 
 canonical_branch() { printf '%s%s\n' "$CANONICAL_BRANCH_PREFIX" "$1"; }
 
+# The worktree (main checkout or linked) a local branch is checked out in;
+# nothing when it is checked out nowhere.
+branch_worktree() {  # <main-root> <branch>
+  git -C "$1" worktree list --porcelain \
+    | awk -v want="branch refs/heads/$2" '/^worktree /{wt=substr($0,10)} $0==want && !seen{print wt; seen=1}'
+}
+
+# Run a command under a wall-clock limit (plain command when the machine has no
+# `timeout` binary; macOS ships none, Homebrew's coreutils provides it).
+run_with_timeout() {  # seconds cmd...
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
+}
+
+# A local base branch that sits behind its upstream hands the env stale code
+# with nothing to show for it, and stale dependencies too when the main checkout
+# is the stale one, since provision seeds from there. So before branching,
+# `create` compares the base with its upstream and closes the gap.
+#
+# It FETCHES first, the one place the engine talks to a remote. Nothing fetches
+# on its own, so a remote-tracking ref can be days old (a PR merged on the
+# host, no pull since), and comparing against it would repeat the very trap
+# this exists to close. The fetch is narrow and can't break `create`: only the
+# base's own upstream branch, read from the branch's config (so no remote name
+# is assumed), no prompts, 20 seconds at most, and a failure (offline, a locked
+# SSH agent) is a warning that the comparison used the ref as last fetched. A
+# base without a remote upstream (a tag, a SHA, origin/main itself, a repo with
+# no remote) is taken as it is, unfetched.
+#
+# Behind only: fast-forward the base where that moves nobody's work, which is a
+# branch checked out nowhere, or checked out in a clean worktree (the same as a
+# pull there, dependency reconcile included). A checkout with uncommitted work
+# is never moved; the env then branches from the upstream commit instead, which
+# is what the base becomes once it is pulled. Diverged: warn, change nothing.
+#
+# No separate "reconcile dependencies" step for the env: a fast-forwarded
+# checkout reconciles its own before seeding, and an env that starts ahead of
+# the main checkout's working tree has lockfiles that differ from it, which the
+# config's project_seed_env_files already installs from.
+#
+# Sets the CALLER's `start` (what to branch from) and `from` (its name in
+# messages) when the env must not branch from the local base.
+bring_base_up_to_date() {  # <main-root> <base> <env-name>
+  local main="$1" base="$2" name="$3" up remote rref upname upsha ahead behind at why
+  git -C "$main" show-ref --verify --quiet "refs/heads/$base" || return 0
+  read -r up remote rref < <(git -C "$main" for-each-ref \
+    --format='%(upstream) %(upstream:remotename) %(upstream:remoteref)' "refs/heads/$base") || return 0
+  [[ "$up" == refs/remotes/* && -n "$remote" && -n "$rref" ]] || return 0
+  upname="${up#refs/remotes/}"
+  run_with_timeout 20 env GIT_TERMINAL_PROMPT=0 git -C "$main" fetch --quiet --no-tags \
+      --no-recurse-submodules "$remote" "$rref" </dev/null >/dev/null 2>&1 \
+    || warn "could not fetch $upname (offline, credentials locked, or no answer within 20s), so '$base' is compared with $upname AS LAST FETCHED, which may itself be out of date. To see why: git -C $main fetch $remote"
+  upsha=$(git -C "$main" rev-parse --verify --quiet "$up^{commit}") || return 0
+  read -r ahead behind \
+    < <(git -C "$main" rev-list --left-right --count "refs/heads/$base...$upsha") || return 0
+  (( behind > 0 )) || return 0
+
+  if (( ahead > 0 )); then
+    warn "base '$base' has diverged from $upname ($ahead ahead, $behind behind); '$name' branches from local '$base' and so LACKS those $behind upstream commit(s). Reconcile '$base' first, or pass '$upname' as the base-ref."
+    return 0
+  fi
+
+  at=$(branch_worktree "$main" "$base")
+  if [[ -z "$at" ]]; then
+    # git itself refuses when the branch is mid-rebase or mid-bisect somewhere.
+    if git -C "$main" branch -f "$base" "$upsha" >/dev/null; then
+      say "base '$base' was $behind commit(s) behind $upname: fast-forwarded it (checked out nowhere, so no working tree moved)"
+      return 0
+    fi
+    why="git refused to move it"
+  elif [[ -n "$(git -C "$at" status --porcelain 2>/dev/null)" ]]; then
+    why="it is checked out with uncommitted changes in $at"
+  # The repo's post-merge hook would run sync-deps too; it is told to stand
+  # down so the reconcile runs once, here, whether or not the hook is installed.
+  elif AGENT_ENV_NO_HOOK_SYNC=1 git -C "$at" merge --ff-only --quiet "$upsha"; then
+    say "base '$base' was $behind commit(s) behind $upname: fast-forwarded it in $at, which was clean"
+    ( cd "$at" && cmd_sync_deps ) \
+      || warn "the dependency reconcile failed in $at; check its dependencies before trusting what an env seeds from it"
+    return 0
+  else
+    why="the fast-forward failed in $at"
+  fi
+  start="$upsha"; from="$upname"
+  warn "base '$base' is $behind commit(s) behind $upname, but $why, so it stays where it is. '$name' branches from $upname (${upsha:0:9}) instead; bring '$base' up to date there when you can."
+}
+
 # Count commits reachable ONLY from $branch (in repo $1): not from any other local
 # branch, nor any remote-tracking ref. 0 means deleting the branch loses nothing
 # that exists elsewhere. This is the right "is it safe to delete" question, and it
@@ -441,12 +526,14 @@ cmd_create() {
   # env off their work-in-progress would be a mess to unpick later.
   git -C "$main" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
     || die "base ref '$base' not found; this repo's default branch looks like '$(default_branch "$main")' (usage: agent-env.sh create $name <base-ref>)"
+  local start="$base" from="$base"
+  bring_base_up_to_date "$main" "$base" "$name"
   say "main checkout is on $(main_state "$main")"
   [[ "$(main_branch "$main")" == "$base" ]] \
     || warn "main checkout is not on '$base'; '$name' still branches from '$base' (pass a base-ref to branch from something else)"
 
-  say "creating worktree $wt (branch $branch from $base)"
-  git -C "$main" worktree add -b "$branch" "$wt" "$base" --quiet
+  say "creating worktree $wt (branch $branch from $from)"
+  git -C "$main" worktree add -b "$branch" "$wt" "$start" --quiet
   cmd_provision "$wt"
 }
 
@@ -804,6 +891,8 @@ cmd_install_hooks() {
 # hooks; safe to run by hand. No ORIG_HEAD (fresh clone, no prior op) -> no-op.
 cmd_sync_deps() {
   local root changed lf
+  # Set by `create` around its own fast-forward, which then calls this directly.
+  [[ -z "${AGENT_ENV_NO_HOOK_SYNC:-}" ]] || return 0
   root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
   cd "$root"
   git rev-parse --verify --quiet ORIG_HEAD >/dev/null 2>&1 || return 0

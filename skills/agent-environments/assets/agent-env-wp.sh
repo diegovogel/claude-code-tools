@@ -162,6 +162,68 @@ md5_str() { # string -> md5 hex (macOS ships md5, Linux md5sum)
 run_with_timeout() { # seconds cmd... (plain cmd when no timeout binary)
   if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
 }
+# The worktree (a repo's own checkout or a linked one) a local branch is checked
+# out in; nothing when it is checked out nowhere.
+branch_worktree() {  # <repo-checkout> <branch>
+  git -C "$1" worktree list --porcelain \
+    | awk -v want="branch refs/heads/$2" '/^worktree /{wt=substr($0,10)} $0==want && !seen{print wt; seen=1}'
+}
+# The generic engine's bring_base_up_to_date (agent-env.sh has the rationale):
+# fetch the base's upstream branch, bounded and best-effort, then fast-forward a
+# base that is only behind wherever that moves nobody's work (checked out
+# nowhere, or in a clean checkout), and otherwise leave it alone and branch the
+# env from the upstream commit. It matters more here than there: the default
+# base is the checkout's current branch, usually a long-lived one that others
+# push to. It also serves SIBLING repos (4th argument): a sibling is another
+# repo with its own config, so its dependency reconcile is left to its own
+# post-merge hook rather than run here with this project's.
+# Sets the CALLER's `start` (what to branch from) and `from` (its name in
+# messages) when the env must not branch from the local base.
+bring_base_up_to_date() {  # <repo-checkout> <base> <env-name> [sibling]
+  local main="$1" base="$2" name="$3" own=1 up remote rref upname upsha ahead behind at why hint=""
+  [[ -z "${4:-}" ]] || own=""
+  git -C "$main" show-ref --verify --quiet "refs/heads/$base" || return 0
+  read -r up remote rref < <(git -C "$main" for-each-ref \
+    --format='%(upstream) %(upstream:remotename) %(upstream:remoteref)' "refs/heads/$base") || return 0
+  [[ "$up" == refs/remotes/* && -n "$remote" && -n "$rref" ]] || return 0
+  upname="${up#refs/remotes/}"
+  run_with_timeout 20 env GIT_TERMINAL_PROMPT=0 git -C "$main" fetch --quiet --no-tags \
+      --no-recurse-submodules "$remote" "$rref" </dev/null >/dev/null 2>&1 \
+    || warn "could not fetch $upname in $main (offline, credentials locked, or no answer within 20s), so '$base' is compared with $upname AS LAST FETCHED, which may itself be out of date. To see why: git -C $main fetch $remote"
+  upsha=$(git -C "$main" rev-parse --verify --quiet "$up^{commit}") || return 0
+  read -r ahead behind \
+    < <(git -C "$main" rev-list --left-right --count "refs/heads/$base...$upsha") || return 0
+  (( behind > 0 )) || return 0
+
+  if (( ahead > 0 )); then
+    [[ -z "$own" ]] || hint=", or pass '$upname' as the base-ref"
+    warn "base '$base' in $main has diverged from $upname ($ahead ahead, $behind behind); '$name' branches from local '$base' and so LACKS those $behind upstream commit(s). Reconcile '$base' first$hint."
+    return 0
+  fi
+
+  at=$(branch_worktree "$main" "$base")
+  if [[ -z "$at" ]]; then
+    # git itself refuses when the branch is mid-rebase or mid-bisect somewhere.
+    if git -C "$main" branch -f "$base" "$upsha" >/dev/null; then
+      say "base '$base' in $main was $behind commit(s) behind $upname: fast-forwarded it (checked out nowhere, so no working tree moved)"
+      return 0
+    fi
+    why="git refused to move it"
+  elif [[ -n "$(git -C "$at" status --porcelain 2>/dev/null)" ]]; then
+    why="it is checked out with uncommitted changes in $at"
+  # This repo's post-merge hook would run sync-deps too; it is told to stand
+  # down so the reconcile runs once, here, whether or not the hook is installed.
+  elif AGENT_ENV_NO_HOOK_SYNC="$own" git -C "$at" merge --ff-only --quiet "$upsha"; then
+    say "base '$base' was $behind commit(s) behind $upname: fast-forwarded it in $at, which was clean"
+    [[ -z "$own" ]] || ( cd "$at" && cmd_sync_deps ) \
+      || warn "the dependency reconcile failed in $at; check its dependencies before trusting what an env clones from it"
+    return 0
+  else
+    why="the fast-forward failed in $at"
+  fi
+  start="$upsha"; from="$upname"
+  warn "base '$base' is $behind commit(s) behind $upname, but $why, so it stays where it is. '$name' branches from $upname (${upsha:0:9}) instead; bring '$base' up to date there when you can."
+}
 
 # ---- WordPress-specific helpers -------------------------------------------
 # The MAIN checkout, resolved from anywhere -- including from inside an env's own
@@ -527,6 +589,8 @@ cmd_install_hooks() {
 # finished (ORIG_HEAD..HEAD), run project_sync_deps. Called by the git hooks.
 cmd_sync_deps() {
   local root changed p
+  # Set by `create` around its own fast-forward, which then calls this directly.
+  [[ -z "${AGENT_ENV_NO_HOOK_SYNC:-}" ]] || return 0
   root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
   cd "$root"
   git rev-parse --verify --quiet ORIG_HEAD >/dev/null 2>&1 || return 0
@@ -613,9 +677,11 @@ add_sibling_worktree() { # main-checkout worktree-path branch rel site name
   say "sibling $rel: worktree on $branch from its checkout's current branch '$sbase'"
   [[ -z "$(git -C "$main" status --porcelain 2>/dev/null)" ]] \
     || warn "that checkout has uncommitted changes; the env branches from its last COMMIT"
+  local start="$sbase" from="$sbase"
+  bring_base_up_to_date "$main" "$sbase" "$name" sibling
   rm -rf "${wt:?}"
   exclude_artifacts "$main"
-  git -C "$main" worktree add "$wt" -b "$branch" "$sbase" --quiet
+  git -C "$main" worktree add "$wt" -b "$branch" "$start" --quiet
   setup_wp_env "$site" "$name" "$wt" "$rel"
   provision_worktree_deps "$main" "$wt" "$rel"
 }
@@ -651,6 +717,10 @@ cmd_create() {
   # worktree add`, which runs after the claim, slot, metadata and a 1.8 GB clone.
   git -C "$repo" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
     || die "base ref '$base' not found in $repo (usage: create <name> [base-ref])"
+  # Before anything is claimed or cloned, so the clone below copies a checkout
+  # that is already current.
+  local start="$base" from="$base"
+  bring_base_up_to_date "$repo" "$base" "$name"
   install="$ENV_PARENT/${site}__${name}"
 
   # Serialize creates of the SAME name. The install-path check below is a
@@ -752,8 +822,8 @@ EOF
 
   # Swap the cloned theme/plugin dir for a git worktree on the env branch.
   rm -rf "${install:?}/$rel"
-  git -C "$repo" worktree add "$install/$rel" -b "$branch" "$base" --quiet
-  say "worktree: $install/$rel  (branch $branch from $base)"
+  git -C "$repo" worktree add "$install/$rel" -b "$branch" "$start" --quiet
+  say "worktree: $install/$rel  (branch $branch from $from)"
   # Before the dependencies: the pinned port must exist even if an install fails.
   setup_wp_env "$site" "$name" "$install/$rel" "$rel"
 
@@ -1044,6 +1114,9 @@ cmd_destroy() {
   sweep_orphan_wp_envs
   say "destroyed '$name' (slot ${AGENT_ENV_SLOT:-?} freed)"
 }
+
+# Sourced rather than run (tests calling one function): define, don't dispatch.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 cmd="${1:-}"; [[ -n "$cmd" ]] && shift || { sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 case "$cmd" in

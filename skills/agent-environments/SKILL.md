@@ -74,7 +74,7 @@ package scripts for the exact wrappers):
 
 | Command | What it does |
 |---|---|
-| `scripts/agent-env.sh create <name>` | New worktree + canonical branch + provision |
+| `scripts/agent-env.sh create <name> [base-ref]` | New worktree + canonical branch + provision (a base branch behind its upstream is [brought up to date first](#a-base-branch-behind-its-upstream)) |
 | `scripts/agent-env.sh provision [path]` | Provision an existing worktree (idempotent) |
 | `scripts/agent-env.sh run <name> -- <cmd>` | Run a command **in** the env regardless of the shell's cwd (the re-anchor fix) |
 | `scripts/agent-env.sh serve <name>` | Start the env's dev stack on its own ports (background, health-checked) |
@@ -201,6 +201,34 @@ CLAUDE.md too. The reasoning:
   from the main checkout's *working tree* (config file, dependency dirs), so a
   new env inherits whatever branch is sitting there; the lockfile reconcile
   repairs dependencies, but a branch-local config edit carries over.
+- <a id="a-base-branch-behind-its-upstream"></a>**A base branch behind its
+  upstream doesn't reach the env.** A local `main` nobody pulled since the last
+  PR merged would hand the env stale code, and stale dependencies seeded from
+  the stale checkout, with nothing in the output to show it. So `create`
+  compares the base with its upstream and prints what it did:
+
+  | The base branch is | `create` |
+  |---|---|
+  | behind, checked out nowhere | fast-forwards the ref; no working tree moves |
+  | behind, checked out in a clean worktree (usually the main checkout) | fast-forwards it there, the same as a pull, and runs the dependency reconcile for a changed lockfile |
+  | behind, checked out with uncommitted changes | leaves it alone and warns; the env branches from the upstream commit instead, and its seeded dependencies are reconciled against its own lockfiles |
+  | diverged (commits on both sides) | moves nothing and warns that the env, branching from the local base, lacks the upstream commits |
+
+  It **fetches the base's upstream first**, because nothing else fetches
+  automatically: a remote-tracking ref is only as fresh as the last `fetch` or
+  `pull` someone happened to run, which can be days ago. The fetch is the only
+  time the engine contacts a remote. It takes just that one branch, from the
+  remote named in the branch's own config, without prompting, and gives up after
+  20 seconds. If it fails (offline, a locked SSH agent, a hung host), `create`
+  still runs, warns that it compared against the upstream **as last fetched**,
+  and names the `git fetch` to run to see why. A base with no remote upstream (a
+  tag, a SHA, `origin/main` itself, a repo with no remote) is used as it is,
+  unfetched. This covers `create` only: a worktree made by `EnterWorktree` and
+  then provisioned starts wherever the runtime put it, so compare it with the
+  remote yourself (`git -C <worktree> fetch` then
+  `git -C <worktree> log --oneline HEAD..origin/main`). The WordPress script's
+  `create` does the same for its base and for each sibling repo's branch
+  ([`references/wordpress.md`](references/wordpress.md#other-notes)).
 - **What you can verify in an env**: unit/integration tests, builds, and
   curl/supertest against the env's own ports. Anything pinned to a **fixed
   external address** (a sideloaded manifest, an OAuth redirect URI, a webhook,
@@ -282,7 +310,7 @@ shared, and each has a rule:
 
 | Shared | Rule |
 |---|---|
-| The main checkout's HEAD and working tree | Never assume it is on the default branch (cardinal rule above). Never `checkout`/`switch`/`stash`/`clean`/`reset` there. It is someone's live workspace, and `git stash` is **one list across all worktrees**, so a stash of theirs is visible, and poppable, from an env. |
+| The main checkout's HEAD and working tree | Never assume it is on the default branch (cardinal rule above). Never `checkout`/`switch`/`stash`/`clean`/`reset` there. It is someone's live workspace, and `git stash` is **one list across all worktrees**, so a stash of theirs is visible, and poppable, from an env. The one thing the engine itself does there: `create` fast-forwards the base branch when it is checked out **clean** and behind its upstream (what their next pull would do), and never when anything is uncommitted ([above](#a-base-branch-behind-its-upstream)). |
 | The main ports | Takeover QA (`serve <name> --main-ports`) needs them free. Ask before stopping a dev server you did not start; `serve` names this cause when the port is busy. |
 | One `.git` | Branches, hooks and refs are shared; a branch checked out in one worktree cannot be checked out in another. Env branches live in their own `worktree-` namespace, so a person's `feature/...` branch never collides. |
 | The repo root | `git clean -fdx` there deletes every env (cardinal rule above). |
@@ -731,7 +759,10 @@ the CLAUDE.md section so agents can find it. See `references/stacks.md`
   and checks the config contract (a missing or incomplete config dies naming
   the path and what is missing), the shim's `guard` in both flows, and a
   create / list / provision-from-inside / run / serve / view / destroy round-trip
-  that leaves the main checkout clean, plus the Herd-adoption cleanup in
+  that leaves the main checkout clean, `create` against a base branch behind
+  its upstream (a local bare remote; clean, uncommitted, checked out nowhere,
+  diverged, moved but unfetched, and unreachable, in both engines, siblings
+  included), plus the Herd-adoption cleanup in
   `list` and `destroy` against a fake Herd registry and a stub `herd`
   (`AGENT_ENV_HERD_VALET`, `AGENT_ENV_HERD_BIN`). `node tests/<file>` and
   `bash tests/engine-config-test.sh` exit non-zero on a failure. Change a hook

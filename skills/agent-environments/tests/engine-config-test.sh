@@ -3,8 +3,8 @@
 # repo and a synthetic config dir (AGENT_ENV_CONFIG_DIR), and checks the shim's
 # local `guard` for both flows, the Herd-adoption cleanup in list and destroy
 # (against a fake Herd registry and a stub herd), plus the WordPress engine's
-# config loading (no WordPress round-trip: that needs an install and a
-# database). Self-contained:
+# config loading and its handling of a base branch behind its upstream (no
+# WordPress round-trip: that needs an install and a database). Self-contained:
 # builds and removes its own temp dirs, starts no servers (the minimal config's
 # project_start_servers is a no-op, its health list is empty, and PORT_BASE sits
 # in a high band nothing uses). Run with `bash tests/engine-config-test.sh`; it
@@ -303,6 +303,109 @@ check "(h) a dangling link with the env's site name but another target is left a
 [[ -z "$(git -C "$repo" status --porcelain)" ]] && herd_has worktree-h.other
 check "(h) main checkout is clean and the other repo's record survived every case" $?
 
+# (s) a base branch behind its upstream. The remote is a local bare repo that is
+# deliberately not named origin, so the fetch `create` does costs nothing and
+# needs no network. upstream.txt doubles as the watched
+# lockfile, and the config's project_sync_deps logs each run, so the cases can
+# count dependency reconciles (the post-merge hook is installed in this repo).
+sync_log="$root/sync.log"; : >"$sync_log"
+printf 'LOCKFILES="upstream.txt"\nproject_sync_deps() { echo synced >>"%s"; }\n' "$sync_log" >>"$cfgdir/repo/project.sh"
+git init -q --bare -b main "$root/hub.git"
+git -C "$repo" remote add hub "$root/hub.git"
+git -C "$repo" push -q -u hub main 2>/dev/null
+fall_behind() { # n: push n new commits to hub/main, then put local main back n commits
+  local i
+  for ((i = 0; i < $1; i++)); do
+    echo "line $RANDOM" >>"$repo/upstream.txt"
+    git -C "$repo" add upstream.txt && git -C "$repo" commit -q -m "upstream work"
+  done
+  git -C "$repo" push -q hub main 2>/dev/null && git -C "$repo" reset -q --hard "HEAD~$1"
+}
+sha() { git -C "$repo" rev-parse "$1"; }
+syncs() { wc -l <"$sync_log" | tr -d ' '; }
+wts="$repo/.claude/worktrees"
+
+out=$(cd "$repo" && ./scripts/agent-env.sh create s0 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ! contains "$out" "behind" && [[ "$(syncs)" == 0 ]]
+check "(s) a base level with its upstream: create says nothing about it and reconciles nothing" $?
+(cd "$repo" && ./scripts/agent-env.sh destroy s0 >/dev/null 2>&1)
+
+# checked out and clean: fast-forwarded where it sits, dependencies reconciled once
+fall_behind 2; old=$(sha main)
+out=$(cd "$repo" && ./scripts/agent-env.sh create s1 2>&1); rc=$?
+[[ $rc -eq 0 && "$(sha main)" == "$(sha hub/main)" && "$(sha main)" != "$old" ]] \
+  && contains "$out" "base 'main' was 2 commit(s) behind hub/main: fast-forwarded it in $repo, which was clean"
+check "(s) base behind, checked out clean in the main checkout: create fast-forwards it and says so" $?
+[[ -f "$repo/upstream.txt" && -z "$(git -C "$repo" status --porcelain)" && "$(git -C "$wts/s1" rev-parse HEAD)" == "$(sha hub/main)" ]]
+check "(s) the main checkout's working tree moved with it, stays clean, and the env starts at the upstream commit" $?
+[[ "$(syncs)" == 1 ]] && contains "$out" "lockfile changed in pull (upstream.txt)"
+check "(s) the fast-forward reconciles the checkout's dependencies exactly once (not again through the post-merge hook)" $?
+(cd "$repo" && ./scripts/agent-env.sh destroy s1 >/dev/null 2>&1)
+
+# checked out with uncommitted work: never moved; the env takes the upstream commit
+fall_behind 1; old=$(sha main); echo "someone's edit" >>"$repo/README.md"
+out=$(cd "$repo" && ./scripts/agent-env.sh create s2 2>&1); rc=$?
+[[ $rc -eq 0 && "$(sha main)" == "$old" ]] && grep -q "someone's edit" "$repo/README.md" \
+  && contains "$out" "WARNING: base 'main' is 1 commit(s) behind hub/main, but it is checked out with uncommitted changes in $repo, so it stays where it is"
+check "(s) base behind, checked out with uncommitted changes: the branch and the edit are left alone, with a warning" $?
+[[ "$(git -C "$wts/s2" rev-parse HEAD)" == "$(sha hub/main)" ]] && contains "$out" "branch worktree-s2 from hub/main)" \
+  && ! git -C "$wts/s2" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1 && [[ "$(syncs)" == 1 ]]
+check "(s) that env branches from the upstream commit instead, tracking nothing, and no reconcile runs in the main checkout" $?
+(cd "$repo" && ./scripts/agent-env.sh destroy s2 >/dev/null 2>&1)
+
+# checked out nowhere (a person on their own branch, mid-edit): only the ref moves
+git -C "$repo" switch -q -c person
+old=$(sha main); person=$(sha person)
+out=$(cd "$repo" && ./scripts/agent-env.sh create s3 2>&1); rc=$?
+[[ $rc -eq 0 && "$(sha main)" == "$(sha hub/main)" && "$(sha main)" != "$old" ]] \
+  && contains "$out" "fast-forwarded it (checked out nowhere"
+check "(s) base behind and checked out nowhere: create fast-forwards the ref" $?
+[[ "$(git -C "$repo" symbolic-ref --short HEAD)" == person && "$(sha person)" == "$person" ]] \
+  && grep -q "someone's edit" "$repo/README.md" && [[ "$(syncs)" == 1 ]] \
+  && [[ "$(git -C "$repo" rev-parse --abbrev-ref 'main@{upstream}')" == hub/main ]]
+check "(s) the main checkout's branch, edit and dependencies are untouched, and main still tracks hub/main" $?
+[[ "$(git -C "$wts/s3" rev-parse HEAD)" == "$(sha hub/main)" ]]
+check "(s) that env starts at the upstream commit" $?
+(cd "$repo" && ./scripts/agent-env.sh destroy s3 >/dev/null 2>&1)
+git -C "$repo" checkout -q -- README.md && git -C "$repo" switch -q main && git -C "$repo" branch -q -D person
+
+# diverged: nothing can be fast-forwarded, so nothing moves and the env keeps the local base
+fall_behind 1
+echo local >"$repo/local.txt"; git -C "$repo" add local.txt && git -C "$repo" commit -q -m "local work"; old=$(sha main)
+out=$(cd "$repo" && ./scripts/agent-env.sh create s4 2>&1); rc=$?
+[[ $rc -eq 0 && "$(sha main)" == "$old" && "$(git -C "$wts/s4" rev-parse HEAD)" == "$old" ]] \
+  && contains "$out" "WARNING: base 'main' has diverged from hub/main (1 ahead, 1 behind)" && contains "$out" "pass 'hub/main' as the base-ref"
+check "(s) base diverged from its upstream: create warns, moves nothing, and branches from the local base" $?
+(cd "$repo" && ./scripts/agent-env.sh destroy s4 >/dev/null 2>&1)
+
+# the remote moved and nothing here fetched it (a PR merged on the host): the
+# local base matches a remote-tracking ref that is itself out of date
+git -C "$repo" reset -q --hard hub/main
+git clone -q "$root/hub.git" "$root/elsewhere" 2>/dev/null
+echo "merged elsewhere" >>"$root/elsewhere/upstream.txt"
+git -C "$root/elsewhere" commit -q -am "merged elsewhere" && git -C "$root/elsewhere" push -q origin main 2>/dev/null
+stale=$(sha hub/main); n=$(syncs)
+out=$(cd "$repo" && ./scripts/agent-env.sh create s5 2>&1); rc=$?
+[[ $rc -eq 0 && "$(sha hub/main)" != "$stale" && "$(sha main)" == "$(git -C "$root/elsewhere" rev-parse HEAD)" ]] \
+  && contains "$out" "base 'main' was 1 commit(s) behind hub/main: fast-forwarded it in $repo" \
+  && [[ "$(git -C "$wts/s5" rev-parse HEAD)" == "$(sha main)" && "$(syncs)" == $((n + 1)) ]]
+check "(s) the remote moved and nobody fetched: create fetches the base's upstream itself, then fast-forwards" $?
+(cd "$repo" && ./scripts/agent-env.sh destroy s5 >/dev/null 2>&1)
+
+# a fetch that cannot succeed is a warning, never a failed or silent create
+echo "merged later" >>"$root/elsewhere/upstream.txt"
+git -C "$root/elsewhere" commit -q -am "merged later" && git -C "$root/elsewhere" push -q origin main 2>/dev/null
+git -C "$repo" remote set-url hub "$root/no-such-remote.git"; old=$(sha main)
+out=$(cd "$repo" && ./scripts/agent-env.sh create s6 2>&1); rc=$?
+git -C "$repo" remote set-url hub "$root/hub.git"
+[[ $rc -eq 0 && "$(sha main)" == "$old" && "$(git -C "$wts/s6" rev-parse HEAD)" == "$old" ]] \
+  && contains "$out" "WARNING: could not fetch hub/main" && contains "$out" "compared with hub/main AS LAST FETCHED" \
+  && contains "$out" "git -C $repo fetch hub"
+check "(s) an unreachable remote: create warns that it compared against the last fetch, and still creates the env" $?
+(cd "$repo" && ./scripts/agent-env.sh destroy s6 >/dev/null 2>&1)
+[[ -z "$(git -C "$repo" status --porcelain)" && -z "$(ls -A "$wts" 2>/dev/null)" ]]
+check "(s) every stale-base env was destroyed and the main checkout is clean" $?
+
 # the shipped example configs load unchanged (the "restate everything" case)
 mkdir -p "$cfgdir/example" "$cfgdir/example-wp"
 cp "$skill/assets/project.example.sh" "$cfgdir/example/project.sh"
@@ -339,6 +442,63 @@ out=$(cd "$root/wp-wt" && ./scripts/agent-env-wp.sh guard 2>&1); rc=$?
 check "WordPress shim: guard exits 1 inside a linked worktree (no marker exists there) and names itself" $?
 grep -q '^AGENT_ENV_PROJECT="wp-repo"$' "$wp_repo/scripts/agent-env-wp.sh" && grep -q 'assets/agent-env-wp.sh}' "$wp_repo/scripts/agent-env-wp.sh"
 check "WordPress shim: both placeholders rendered" $?
+
+# WordPress engine, a base behind its upstream. Still no install round-trip:
+# `create` runs in a bare-bones "install" (an empty wp-config.php above a theme
+# repo) and is stopped right after the base check by a sibling entry that does
+# not exist, before it claims a database or clones anything. The sibling path
+# is driven by sourcing the engine and calling add_sibling_worktree. Each repo
+# gets a post-merge hook that records whether it was told to stand down.
+wpsite="$root/wpsite"; theme="$wpsite/wp-content/themes/t"; plug="$wpsite/wp-content/plugins/p"
+wp_sync_log="$root/wp-sync.log"; : >"$wp_sync_log"
+mkdir -p "$theme" "$plug" "$cfgdir/t"
+: >"$wpsite/wp-config.php"
+printf 'PORT_BASE=47200\nENV_PARENT="%s"\nSIBLING_REPOS="wp-content/plugins/absent"\nLOCKFILES="upstream.txt"\nproject_sync_deps() { echo synced >>"%s"; }\n' \
+  "$root/wp-envs" "$wp_sync_log" >"$cfgdir/t/project.sh"
+wp_repo_behind() { # repo-dir branch: a repo one commit behind its hub, with the recording hook
+  local r="$1" hub="$1.hub.git"
+  git -C "$r" init -q -b "$2" && git init -q --bare -b "$2" "$hub"
+  echo v1 >"$r/upstream.txt"; git -C "$r" add -A && git -C "$r" commit -q -m init
+  git -C "$r" remote add hub "$hub" && git -C "$r" push -q -u hub "$2" 2>/dev/null
+  echo v2 >"$r/upstream.txt"; git -C "$r" commit -q -am "upstream work"
+  git -C "$r" push -q hub "$2" 2>/dev/null && git -C "$r" reset -q --hard HEAD~1
+  printf '#!/bin/sh\necho "stand-down=${AGENT_ENV_NO_HOOK_SYNC:-}" >>"%s.hook.log"\n' "$r" >"$r/.git/hooks/post-merge"
+  chmod +x "$r/.git/hooks/post-merge"
+}
+wp_repo_behind "$theme" main
+out=$(cd "$theme" && AGENT_ENV_PROJECT=t "$wp_engine" create w1 2>&1); rc=$?
+[[ $rc -eq 1 && "$(git -C "$theme" rev-parse main)" == "$(git -C "$theme" rev-parse hub/main)" ]] \
+  && [[ "$(cat "$theme/upstream.txt")" == v2 ]] \
+  && contains "$out" "base 'main' was 1 commit(s) behind hub/main: fast-forwarded it in $theme, which was clean" \
+  && contains "$out" "SIBLING_REPOS entry 'wp-content/plugins/absent' is not a git checkout"
+check "WordPress engine: create fast-forwards a clean checkout of a base behind its upstream, before anything else can fail" $?
+[[ "$(cat "$wp_sync_log")" == synced && "$(cat "$theme.hook.log")" == "stand-down=1" ]]
+check "WordPress engine: that fast-forward reconciles dependencies once, itself, with the repo's hook told to stand down" $?
+[[ ! -e "$root/wp-envs/wpsite__w1" && -z "$(ls -A "$root/wp-envs/.locks" 2>/dev/null)" ]]
+check "WordPress engine: the stopped create left no install and no lock behind" $?
+
+# a sibling: uncommitted work is never moved, a clean checkout is fast-forwarded,
+# and either way its reconcile is its own hook's business, not this project's
+wp_repo_behind "$plug" feature
+sibling_worktree() { # env-name -> runs the engine's add_sibling_worktree for the plugin
+  ( export AGENT_ENV_PROJECT=t; source "$wp_engine"
+    add_sibling_worktree "$plug" "$root/sib-$1" "worktree-$1" wp-content/plugins/p wpsite "$1" ) 2>&1
+}
+old=$(git -C "$plug" rev-parse feature); echo "someone's edit" >>"$plug/upstream.txt"
+out=$(sibling_worktree w2); rc=$?
+[[ $rc -eq 0 && "$(git -C "$plug" rev-parse feature)" == "$old" ]] && grep -q "someone's edit" "$plug/upstream.txt" \
+  && [[ "$(git -C "$root/sib-w2" rev-parse HEAD)" == "$(git -C "$plug" rev-parse hub/feature)" ]] \
+  && contains "$out" "WARNING: base 'feature' is 1 commit(s) behind hub/feature, but it is checked out with uncommitted changes in $plug"
+check "WordPress engine: a sibling behind its upstream with uncommitted changes is left alone; its worktree takes the upstream commit" $?
+git -C "$plug" worktree remove --force "$root/sib-w2" && git -C "$plug" branch -q -D worktree-w2
+git -C "$plug" checkout -q -- upstream.txt
+out=$(sibling_worktree w3); rc=$?
+[[ $rc -eq 0 && "$(git -C "$plug" rev-parse feature)" == "$(git -C "$plug" rev-parse hub/feature)" ]] \
+  && [[ "$(git -C "$root/sib-w3" rev-parse HEAD)" == "$(git -C "$plug" rev-parse hub/feature)" ]] \
+  && contains "$out" "fast-forwarded it in $plug, which was clean"
+check "WordPress engine: a clean sibling behind its upstream is fast-forwarded and its worktree starts there" $?
+[[ "$(cat "$wp_sync_log")" == synced && "$(cat "$plug.hook.log")" == "stand-down=" ]]
+check "WordPress engine: the sibling's own post-merge hook runs unsilenced, and this project's reconcile does not run for it" $?
 
 echo "${failures} failure(s)"
 [[ $failures -eq 0 ]] && echo "all cases passed"
